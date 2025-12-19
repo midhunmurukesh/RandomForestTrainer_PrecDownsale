@@ -18,7 +18,7 @@ echo "Job ID: $PBS_JOBID"
 
 # Run the script
 
-scriptname="rf_downscaler.py"
+scriptname="rf_shap_analysis.py"
 DATA_DIR="/NAS/protem/midhun/AI4KLIM/DATASETS/DATASET_IND32M/DATA_TRANS/numpy"
 SAVE_DIR="/home/kumarp/MIDHUN/RF_OUT"
 
