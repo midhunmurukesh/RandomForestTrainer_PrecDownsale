@@ -1,9 +1,9 @@
 #!/bin/bash
-#PBS -N rf
+#PBS -N rfshap
 #PBS -q workq
-#PBS -l nodes=1:ppn=40
+#PBS -l nodes=node04:ppn=40
 #PBS -j oe
-#PBS -o rf.log
+#PBS -o rfshap.log
 
 # Load Anaconda & activate environment
 source /home/apps/anaconda3/2021.05/etc/profile.d/conda.sh
@@ -20,7 +20,7 @@ echo "Job ID: $PBS_JOBID"
 
 scriptname="rf_shap_analysis.py"
 DATA_DIR="/NAS/protem/midhun/AI4KLIM/DATASETS/DATASET_IND32M/DATA_TRANS/numpy"
-SAVE_DIR="/home/kumarp/MIDHUN/RF_OUT"
+SAVE_DIR="/home/kumarp/MIDHUN/RFSHAP_OUT"
 
 mkdir -p ${SAVE_DIR}
 
