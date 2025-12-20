@@ -90,16 +90,33 @@ class RFWithTuning:
         print("HYPERPARAMETER TUNING")
         print('='*80)
         
-        # Define parameter grid
+        # -------------------------------------------------------------------------------------
+        
+        # # Define parameter grid # Fast Config
+        # param_distributions = {
+        #     'n_estimators': [50, 100, 150, 200],
+        #     'max_depth': [10, 15, 20, 25, 30, None],
+        #     'min_samples_split': [10, 20, 50, 100],
+        #     'min_samples_leaf': [5, 10, 20],
+        #     'max_features': ['sqrt', 'log2', 0.3, 0.5],
+        #     'bootstrap': [True],
+        #     'max_samples': [0.7, 0.8, 0.9, 1.0]
+        # }
+        
+        # -------------------------------------------------------------------------------------
+        
+        # Example: If Phase 1 found max_depth=30, n_estimators=200 work well
         param_distributions = {
-            'n_estimators': [50, 100, 150, 200],
-            'max_depth': [10, 15, 20, 25, 30, None],
-            'min_samples_split': [10, 20, 50, 100],
-            'min_samples_leaf': [5, 10, 20],
-            'max_features': ['sqrt', 'log2', 0.3, 0.5],
+            'n_estimators': [200, 300, 400, 500],           # Around best from Phase 1
+            'max_depth': [25, 30, 35, 40],                  # Around best from Phase 1
+            'min_samples_split': [10, 15, 20, 30],          # Refined range
+            'min_samples_leaf': [5, 7, 10, 15],             # Refined range
+            'max_features': [0.25, 0.3, 0.35, 'sqrt'],      # Refined range
             'bootstrap': [True],
-            'max_samples': [0.7, 0.8, 0.9, 1.0]
+            'max_samples': [0.75, 0.8, 0.85, 0.9]           # Refined range
         }
+
+        # -------------------------------------------------------------------------------------
         
         print(f"\nParameter search space:")
         for param, values in param_distributions.items():

@@ -20,9 +20,7 @@ echo "Job ID: $PBS_JOBID"
 
 scriptname="rf_analysis.py"
 DATA_DIR="/NAS/protem/midhun/AI4KLIM/DATASETS/DATASET_IND32M/DATA_TRANS/numpy"
-SAVE_DIR="/home/kumarp/MIDHUN/RFTUNE_OUT"
-
-mkdir -p ${SAVE_DIR}
+SAVE_DIR=$(dirname "$PBS_O_WORKDIR")
 
 python ${scriptname} ${DATA_DIR} ${SAVE_DIR} 11323 true
 
