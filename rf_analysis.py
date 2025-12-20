@@ -1,5 +1,5 @@
-# v2.1: RF Perfect Prognosis with Conservative Remapping & Mass Conservation
-# Train at coarse (32x32), validate against MSWX, with mass-conserving upscaling
+# v2.2: RF with Extended Hyperparameter Tuning & Results Saving
+# Expanded search space up to 1000 trees with detailed logging
 
 
 import numpy as np
@@ -8,26 +8,19 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import matplotlib.pyplot as plt
+import pandas as pd
 import warnings
 import os
 from tqdm import tqdm
 import time
 import pickle
-
+import json
 
 warnings.filterwarnings('ignore')
 
-
-
 class RFWithTuning:
     """
-    Random Forest with Hyperparameter Tuning for Precipitation Downscaling
-    
-    Methodology:
-    1. Train at coarse resolution (32×32) using atmospheric predictors
-    2. Use CONSERVATIVE SUM for coarsening (preserves extremes)
-    3. Tune hyperparameters to find best model
-    4. Upscale predictions with MASS-CONSERVING bilinear interpolation
+    Random Forest with Extended Hyperparameter Tuning for Precipitation Downscaling
     """
     
     def __init__(self, n_jobs=-1, random_state=42):
@@ -36,6 +29,7 @@ class RFWithTuning:
         self.best_model = None
         self.best_params = None
         self.tuning_results = None
+        self.cv_results_df = None
         
         print(f"Initialized RF with {self.n_jobs} CPU cores")
     
@@ -75,47 +69,53 @@ class RFWithTuning:
         return X_flat, y_flat
     
     def hyperparameter_tuning(self, X_train, y_train, X_val, y_val, 
-                             n_iter=20, cv=3):
+                             n_iter=50, cv=3, save_dir=None):
         """
-        Hyperparameter tuning using RandomizedSearchCV
+        Extended hyperparameter tuning with comprehensive results saving
         
         Parameters:
         -----------
         X_train : array - training features
         y_train : array - training targets
-        X_val : array - validation features (for final evaluation)
-        y_val : array - validation targets (for final evaluation)
+        X_val : array - validation features
+        y_val : array - validation targets
         n_iter : int - number of parameter settings sampled
         cv : int - cross-validation folds
+        save_dir : str - directory to save tuning results
         """
         print(f"\n{'='*80}")
-        print("HYPERPARAMETER TUNING")
+        print("EXTENDED HYPERPARAMETER TUNING")
         print('='*80)
         
-        # Refined parameter grid
+        # EXTENDED parameter grid (up to 1000 trees)
         param_distributions = {
-            'n_estimators': [200, 300, 400, 500],
-            'max_depth': [25, 30, 35, 40],
-            'min_samples_split': [10, 15, 20, 30],
-            'min_samples_leaf': [5, 7, 10, 15],
-            'max_features': [0.25, 0.3, 0.35, 'sqrt'],
+            'n_estimators': [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000],
+            'max_depth': [15, 20, 25, 30, 35, 40, 45, 50, None],
+            'min_samples_split': [5, 10, 15, 20, 30, 50, 100],
+            'min_samples_leaf': [1, 2, 5, 7, 10, 15, 20],
+            'max_features': [0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 'sqrt', 'log2'],
             'bootstrap': [True],
-            'max_samples': [0.75, 0.8, 0.85, 0.9]
+            'max_samples': [0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
         }
         
-        print(f"\nParameter search space:")
+        print(f"\nExtended parameter search space:")
         for param, values in param_distributions.items():
             print(f"  {param:20s}: {values}")
         
+        total_combinations = 1
+        for values in param_distributions.values():
+            total_combinations *= len(values)
+        
         print(f"\nSearch strategy:")
-        print(f"  Method:           RandomizedSearchCV")
-        print(f"  Iterations:       {n_iter}")
-        print(f"  Cross-validation: {cv}-fold")
-        print(f"  Scoring:          R² (coefficient of determination)")
-        print(f"  Total fits:       {n_iter * cv}")
+        print(f"  Total combinations:   {total_combinations:,}")
+        print(f"  Sampling:             {n_iter} iterations")
+        print(f"  Coverage:             {n_iter/total_combinations*100:.2f}%")
+        print(f"  Cross-validation:     {cv}-fold")
+        print(f"  Scoring:              R²")
+        print(f"  Total model fits:     {n_iter * cv:,}")
         
         # Subsample training data for faster tuning
-        max_tuning_samples = 50000
+        max_tuning_samples = 100000  # Increased for better estimates
         if X_train.shape[0] > max_tuning_samples:
             print(f"\n⚠ Subsampling to {max_tuning_samples:,} samples for faster tuning...")
             np.random.seed(self.random_state)
@@ -132,7 +132,8 @@ class RFWithTuning:
         rf_base = RandomForestRegressor(
             n_jobs=self.n_jobs,
             random_state=self.random_state,
-            verbose=0
+            verbose=0,
+            warm_start=False
         )
         
         # Randomized search
@@ -142,13 +143,15 @@ class RFWithTuning:
             n_iter=n_iter,
             cv=cv,
             scoring='r2',
-            n_jobs=1,
+            n_jobs=1,  # Parallel at tree level
             verbose=2,
             random_state=self.random_state,
-            return_train_score=True
+            return_train_score=True,
+            refit=True
         )
         
         print("\nStarting hyperparameter search...")
+        print(f"Estimated time: {n_iter * cv * 2 / 60:.1f} - {n_iter * cv * 5 / 60:.1f} minutes")
         start_time = time.time()
         
         search.fit(X_tune, y_tune)
@@ -160,6 +163,9 @@ class RFWithTuning:
         self.best_params = search.best_params_
         self.tuning_results = search.cv_results_
         
+        # Create detailed results DataFrame
+        self.cv_results_df = pd.DataFrame(self.tuning_results)
+        
         # Print best parameters
         print(f"\n{'='*80}")
         print("BEST PARAMETERS FOUND")
@@ -167,9 +173,28 @@ class RFWithTuning:
         for param, value in self.best_params.items():
             print(f"  {param:20s}: {value}")
         
-        print(f"\nCross-validation scores:")
-        print(f"  Best CV R²:     {search.best_score_:.4f}")
-        print(f"  CV R² std:      {self.tuning_results['std_test_score'][search.best_index_]:.4f}")
+        print(f"\nCross-validation performance:")
+        print(f"  Best CV R²:          {search.best_score_:.6f}")
+        print(f"  CV R² std:           {self.tuning_results['std_test_score'][search.best_index_]:.6f}")
+        print(f"  Best CV rank:        {search.best_index_ + 1}/{n_iter}")
+        
+        # Get top 10 configurations
+        print(f"\n{'='*80}")
+        print("TOP 10 CONFIGURATIONS")
+        print('='*80)
+        
+        top_10_idx = np.argsort(self.tuning_results['mean_test_score'])[-10:][::-1]
+        
+        print(f"\n{'Rank':<6} {'R²':<10} {'±std':<10} {'Trees':<8} {'Depth':<8} {'Features':<12}")
+        print("-" * 80)
+        for rank, idx in enumerate(top_10_idx, 1):
+            r2_mean = self.tuning_results['mean_test_score'][idx]
+            r2_std = self.tuning_results['std_test_score'][idx]
+            params = self.tuning_results['params'][idx]
+            
+            print(f"{rank:<6} {r2_mean:<10.6f} {r2_std:<10.6f} "
+                  f"{params['n_estimators']:<8} {str(params['max_depth']):<8} "
+                  f"{str(params['max_features']):<12}")
         
         # Evaluate best model on validation set
         print(f"\n{'='*80}")
@@ -182,19 +207,225 @@ class RFWithTuning:
         val_rmse = np.sqrt(mean_squared_error(y_val, y_val_pred))
         val_mae = mean_absolute_error(y_val, y_val_pred)
         
-        print(f"  Validation R²:    {val_r2:.4f}")
-        print(f"  Validation RMSE:  {val_rmse:.4f} mm")
-        print(f"  Validation MAE:   {val_mae:.4f} mm")
+        print(f"  Validation R²:       {val_r2:.6f}")
+        print(f"  Validation RMSE:     {val_rmse:.4f} mm")
+        print(f"  Validation MAE:      {val_mae:.4f} mm")
+        
+        # Check for overfitting
+        train_r2 = self.tuning_results['mean_train_score'][search.best_index_]
+        overfit_gap = train_r2 - search.best_score_
+        
+        print(f"\n  Train R² (CV):       {train_r2:.6f}")
+        print(f"  Test R² (CV):        {search.best_score_:.6f}")
+        print(f"  Overfit gap:         {overfit_gap:.6f}")
+        if overfit_gap > 0.05:
+            print(f"  ⚠ WARNING: Possible overfitting detected!")
+        else:
+            print(f"  ✓ No significant overfitting")
         
         # Store best estimator
         self.best_model = search.best_estimator_
         
+        # Save tuning results if directory provided
+        if save_dir:
+            self.save_tuning_results(save_dir, elapsed)
+        
         return self.best_params, search.best_score_
     
+    def save_tuning_results(self, save_dir, elapsed_time):
+        """
+        Save comprehensive tuning results to multiple formats
+        """
+        print(f"\n{'='*80}")
+        print("SAVING TUNING RESULTS")
+        print('='*80)
+        
+        # 1. Save best parameters (JSON)
+        best_params_path = os.path.join(save_dir, 'best_params.json')
+        with open(best_params_path, 'w') as f:
+            # Convert numpy types to Python types for JSON
+            params_serializable = {}
+            for k, v in self.best_params.items():
+                if isinstance(v, (np.integer, np.floating)):
+                    params_serializable[k] = v.item()
+                else:
+                    params_serializable[k] = v
+            json.dump(params_serializable, f, indent=2)
+        print(f"✓ Best parameters (JSON):     {best_params_path}")
+        
+        # 2. Save all CV results (CSV)
+        cv_results_path = os.path.join(save_dir, 'cv_results_all.csv')
+        self.cv_results_df.to_csv(cv_results_path, index=False)
+        print(f"✓ All CV results (CSV):       {cv_results_path}")
+        
+        # 3. Save top 50 configurations (CSV)
+        top_50_path = os.path.join(save_dir, 'cv_results_top50.csv')
+        top_50_idx = np.argsort(self.cv_results_df['mean_test_score'])[-50:][::-1]
+        top_50_df = self.cv_results_df.iloc[top_50_idx]
+        top_50_df.to_csv(top_50_path, index=False)
+        print(f"✓ Top 50 configs (CSV):       {top_50_path}")
+        
+        # 4. Save summary statistics (TXT)
+        summary_path = os.path.join(save_dir, 'tuning_summary.txt')
+        with open(summary_path, 'w') as f:
+            f.write("="*80 + "\n")
+            f.write("HYPERPARAMETER TUNING SUMMARY\n")
+            f.write("="*80 + "\n\n")
+            
+            f.write(f"Tuning time: {elapsed_time:.1f}s ({elapsed_time/60:.1f} min)\n")
+            f.write(f"Total iterations: {len(self.cv_results_df)}\n")
+            f.write(f"CV folds: {self.cv_results_df['split0_test_score'].notna().sum()}\n\n")
+            
+            f.write("Best parameters:\n")
+            for param, value in self.best_params.items():
+                f.write(f"  {param:20s}: {value}\n")
+            
+            f.write(f"\nBest CV R²: {self.cv_results_df['mean_test_score'].max():.6f}\n")
+            f.write(f"Best CV std: {self.cv_results_df.loc[self.cv_results_df['mean_test_score'].idxmax(), 'std_test_score']:.6f}\n")
+            
+            f.write(f"\nParameter importance (range of R² across values):\n")
+            for param in self.best_params.keys():
+                if param in ['n_estimators', 'max_depth', 'max_features']:
+                    param_col = f'param_{param}'
+                    if param_col in self.cv_results_df.columns:
+                        grouped = self.cv_results_df.groupby(param_col)['mean_test_score']
+                        r2_range = grouped.max().max() - grouped.max().min()
+                        f.write(f"  {param:20s}: Δ R² = {r2_range:.6f}\n")
+        
+        print(f"✓ Tuning summary (TXT):       {summary_path}")
+        
+        # 5. Save raw CV results (NPZ)
+        cv_results_npz_path = os.path.join(save_dir, 'cv_results_raw.npz')
+        np.savez_compressed(cv_results_npz_path, **self.tuning_results)
+        print(f"✓ Raw CV results (NPZ):       {cv_results_npz_path}")
+        
+        # 6. Create visualization plots
+        self.plot_tuning_results(save_dir)
+        
+        print(f"\n✓ All tuning results saved to: {save_dir}")
+    
+    def plot_tuning_results(self, save_dir):
+        """
+        Create comprehensive visualization of tuning results
+        """
+        print(f"\nGenerating tuning visualizations...")
+        
+        # Figure 1: Hyperparameter importance
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle('Hyperparameter Tuning Results', fontsize=16, fontweight='bold')
+        
+        params_to_plot = ['n_estimators', 'max_depth', 'max_features', 
+                         'min_samples_split', 'min_samples_leaf', 'max_samples']
+        
+        for idx, param in enumerate(params_to_plot):
+            ax = axes[idx // 3, idx % 3]
+            param_col = f'param_{param}'
+            
+            if param_col in self.cv_results_df.columns:
+                # Group by parameter value
+                grouped = self.cv_results_df.groupby(param_col)['mean_test_score']
+                
+                param_values = []
+                r2_means = []
+                r2_stds = []
+                
+                for val in grouped.groups.keys():
+                    param_values.append(str(val))
+                    r2_means.append(grouped.get_group(val).mean())
+                    r2_stds.append(grouped.get_group(val).std())
+                
+                x_pos = np.arange(len(param_values))
+                ax.bar(x_pos, r2_means, yerr=r2_stds, alpha=0.7, 
+                      color='steelblue', edgecolor='black', linewidth=0.5,
+                      error_kw={'linewidth': 1, 'ecolor': 'red'})
+                ax.set_xticks(x_pos)
+                ax.set_xticklabels(param_values, rotation=45, ha='right')
+                ax.set_xlabel(param.replace('_', ' ').title(), fontweight='bold')
+                ax.set_ylabel('Mean Test R²', fontweight='bold')
+                ax.grid(axis='y', alpha=0.3, linestyle='--')
+                
+                # Highlight best value
+                best_idx = np.argmax(r2_means)
+                ax.axvline(best_idx, color='red', linestyle='--', linewidth=2, alpha=0.5)
+        
+        plt.tight_layout()
+        plot1_path = os.path.join(save_dir, 'hyperparameter_importance.png')
+        plt.savefig(plot1_path, dpi=300, bbox_inches='tight')
+        print(f"✓ Hyperparameter importance:  {plot1_path}")
+        plt.close()
+        
+        # Figure 2: Performance over iterations
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        iterations = np.arange(len(self.cv_results_df))
+        mean_scores = self.cv_results_df['mean_test_score']
+        std_scores = self.cv_results_df['std_test_score']
+        
+        ax.plot(iterations, mean_scores, 'o-', color='steelblue', 
+               markersize=4, linewidth=1, alpha=0.6, label='Test R²')
+        ax.fill_between(iterations, 
+                        mean_scores - std_scores, 
+                        mean_scores + std_scores,
+                        alpha=0.2, color='steelblue')
+        
+        # Highlight best
+        best_idx = mean_scores.idxmax()
+        ax.plot(best_idx, mean_scores[best_idx], 'r*', 
+               markersize=20, label=f'Best (R²={mean_scores[best_idx]:.4f})')
+        
+        ax.set_xlabel('Iteration', fontweight='bold', fontsize=12)
+        ax.set_ylabel('Cross-Validation R²', fontweight='bold', fontsize=12)
+        ax.set_title('Hyperparameter Search Progress', fontweight='bold', fontsize=14)
+        ax.legend(loc='best')
+        ax.grid(alpha=0.3, linestyle='--')
+        
+        plt.tight_layout()
+        plot2_path = os.path.join(save_dir, 'search_progress.png')
+        plt.savefig(plot2_path, dpi=300, bbox_inches='tight')
+        print(f"✓ Search progress:            {plot2_path}")
+        plt.close()
+        
+        # Figure 3: n_estimators vs R² (key parameter)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        if 'param_n_estimators' in self.cv_results_df.columns:
+            n_est_groups = self.cv_results_df.groupby('param_n_estimators')['mean_test_score']
+            
+            n_estimators = []
+            r2_means = []
+            r2_stds = []
+            
+            for n_est in sorted(n_est_groups.groups.keys()):
+                n_estimators.append(n_est)
+                scores = n_est_groups.get_group(n_est)
+                r2_means.append(scores.mean())
+                r2_stds.append(scores.std())
+            
+            n_estimators = np.array(n_estimators)
+            r2_means = np.array(r2_means)
+            r2_stds = np.array(r2_stds)
+            
+            ax.errorbar(n_estimators, r2_means, yerr=r2_stds, 
+                       fmt='o-', color='steelblue', markersize=8,
+                       linewidth=2, capsize=5, capthick=2, 
+                       ecolor='red', label='Mean ± Std')
+            
+            ax.set_xlabel('Number of Trees (n_estimators)', fontweight='bold', fontsize=12)
+            ax.set_ylabel('Cross-Validation R²', fontweight='bold', fontsize=12)
+            ax.set_title('Effect of Number of Trees on Performance', 
+                        fontweight='bold', fontsize=14)
+            ax.legend(loc='best')
+            ax.grid(alpha=0.3, linestyle='--')
+            ax.set_xscale('log')
+            
+            plt.tight_layout()
+            plot3_path = os.path.join(save_dir, 'n_estimators_effect.png')
+            plt.savefig(plot3_path, dpi=300, bbox_inches='tight')
+            print(f"✓ Trees effect:               {plot3_path}")
+            plt.close()
+    
     def train_best_model(self, X_train, y_train, best_params):
-        """
-        Train final model with best parameters on full training data
-        """
+        """Train final model with best parameters"""
         print(f"\n{'='*80}")
         print("TRAINING FINAL MODEL WITH BEST PARAMETERS")
         print('='*80)
@@ -220,7 +451,7 @@ class RFWithTuning:
         
         # Training score
         train_score = self.best_model.score(X_train, y_train)
-        print(f"  Training R²: {train_score:.4f}")
+        print(f"  Training R²: {train_score:.6f}")
         
         return self.best_model
     
@@ -264,9 +495,9 @@ class RFWithTuning:
         mae = mean_absolute_error(y_true_flat, y_pred_flat)
         
         print(f"\nOverall metrics:")
-        print(f"  R² (coefficient of determination): {r2:.4f}")
-        print(f"  RMSE (mm total per cell):          {rmse:.4f}")
-        print(f"  MAE (mm total per cell):           {mae:.4f}")
+        print(f"  R²:   {r2:.6f}")
+        print(f"  RMSE: {rmse:.4f} mm")
+        print(f"  MAE:  {mae:.4f} mm")
         
         return {'r2': r2, 'rmse': rmse, 'mae': mae}
     
@@ -324,10 +555,7 @@ class RFWithTuning:
         return importance
     
     def mass_conserving_upscale(self, y_coarse, target_shape=(320, 320), save_path=None):
-        """
-        Mass-conserving bilinear upscaling from 32×32 to 320×320
-        Ensures exact mass conservation within each coarse cell
-        """
+        """Mass-conserving bilinear upscaling from 32×32 to 320×320"""
         print(f"\n{'='*80}")
         print("MASS-CONSERVING UPSCALING TO FINE RESOLUTION")
         print('='*80)
@@ -363,23 +591,18 @@ class RFWithTuning:
         for ti in tqdm(range(t), desc="Mass correction"):
             for i in range(h_low):
                 for j in range(w_low):
-                    # Target: coarse cell sum
                     target_sum = y_coarse[ti, i, j]
-                    
-                    # Current: interpolated fine cells in this box
                     fine_box = y_fine_interp[ti, 
                                             i*factor_h:(i+1)*factor_h,
                                             j*factor_w:(j+1)*factor_w]
                     current_sum = fine_box.sum()
                     
-                    # Multiplicative correction (preserves spatial pattern)
                     if current_sum > 0:
                         correction_factor = target_sum / current_sum
                         y_fine_corrected[ti,
                                         i*factor_h:(i+1)*factor_h,
                                         j*factor_w:(j+1)*factor_w] = fine_box * correction_factor
                     else:
-                        # Uniform distribution if interpolation gave zero
                         uniform_val = target_sum / (factor_h * factor_w)
                         y_fine_corrected[ti,
                                         i*factor_h:(i+1)*factor_h,
@@ -392,7 +615,7 @@ class RFWithTuning:
         print(f"  Fine total:   {y_fine_corrected.sum():,.2f} mm")
         print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_corrected.sum())/y_coarse.sum()*100:.8f}%")
         
-        # Convert from total mm to mm/day (average over fine cells)
+        # Convert from total mm to mm/day
         y_fine_mmday = y_fine_corrected / (factor_h * factor_w)
         
         print(f"\nFinal fine-resolution predictions:")
@@ -416,12 +639,7 @@ class RFWithTuning:
 
 
 def conservative_coarsen(y_high, coarse_shape=(32, 32)):
-    """
-    Conservative remapping using SUM (vectorized, 100× faster!)
-    - Preserves total precipitation mass
-    - Maintains extreme values
-    - Compatible with mass-conserving upscaling
-    """
+    """Conservative remapping using SUM (vectorized)"""
     print(f"\n{'='*80}")
     print("CONSERVATIVE COARSENING (SUM)")
     print('='*80)
@@ -438,24 +656,18 @@ def conservative_coarsen(y_high, coarse_shape=(32, 32)):
     
     start_time = time.time()
     
-    # VECTORIZED APPROACH (no loops over space!)
-    # Reshape to separate coarse and fine dimensions
     y_reshaped = y_high[:, :, :, 0].reshape(
         t, 
         h_coarse, factor_h,
         w_coarse, factor_w
     )
     
-    # Sum over fine-scale dimensions (axis 2 and 4)
     y_coarse_3d = y_reshaped.sum(axis=(2, 4))
-    
-    # Reshape to 4D
     y_coarse = y_coarse_3d.reshape(t, h_coarse, w_coarse, 1).astype(np.float32)
     
     elapsed = time.time() - start_time
     print(f"\n✓ Coarsening completed in {elapsed:.1f}s")
     
-    # Validation
     fine_total = y_high.sum()
     coarse_total = y_coarse.sum()
     mass_error = abs(fine_total - coarse_total) / fine_total * 100
@@ -463,15 +675,13 @@ def conservative_coarsen(y_high, coarse_shape=(32, 32)):
     print(f"\n✓ Mass conservation:")
     print(f"  Fine total:     {fine_total:,.2f} mm")
     print(f"  Coarse total:   {coarse_total:,.2f} mm")
-    print(f"  Error:          {mass_error:.8f}% (perfect = 0%)")
+    print(f"  Error:          {mass_error:.8f}%")
     
     print(f"\n✓ Value preservation:")
     print(f"  Fine mean:      {y_high.mean():.4f} mm/day")
     print(f"  Coarse mean:    {y_coarse.mean():.4f} mm (total per cell)")
     print(f"  Fine max:       {y_high.max():.2f} mm/day")
     print(f"  Coarse max:     {y_coarse.max():.2f} mm (total per cell)")
-    print(f"  Fine 99th:      {np.percentile(y_high, 99):.2f} mm/day")
-    print(f"  Coarse 99th:    {np.percentile(y_coarse, 99):.2f} mm (total per cell)")
     
     return y_coarse
 
@@ -484,7 +694,6 @@ def load_data(data_path):
     print('='*80)
     print(f"Data path: {data_path}")
     
-    # 27 atmospheric channels (RAW - no standardization for RF)
     inputs_channels = {
         'z850': f'{data_path}/IND32M_ERA5_100_Z850_DAY_1979_2023_RBIL.npy',
         'z700': f'{data_path}/IND32M_ERA5_100_Z700_DAY_1979_2023_RBIL.npy',
@@ -541,9 +750,9 @@ def load_data(data_path):
 
 
 
-def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter=20):
+def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter=50):
     """
-    Complete RF pipeline with conservative remapping and mass conservation
+    Complete RF pipeline with extended hyperparameter tuning
     
     Parameters:
     -----------
@@ -551,24 +760,21 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     save_dir : str
     train_size : int - training timesteps
     tune_model : bool - whether to do hyperparameter tuning
-    n_iter : int - number of tuning iterations
+    n_iter : int - number of tuning iterations (recommended: 50-100)
     """
     os.makedirs(save_dir, exist_ok=True)
     
     print("\n" + "="*80)
-    print("RF PERFECT PROGNOSIS WITH MASS CONSERVATION")
+    print("RF PERFECT PROGNOSIS WITH EXTENDED TUNING")
     print("="*80)
     print(f"\nConfiguration:")
-    print(f"  Data path:       {data_path}")
-    print(f"  Save path:       {save_dir}")
-    print(f"  Training size:   {train_size} days")
-    print(f"  Tuning enabled:  {tune_model}")
+    print(f"  Data path:          {data_path}")
+    print(f"  Save path:          {save_dir}")
+    print(f"  Training size:      {train_size} days")
+    print(f"  Tuning enabled:     {tune_model}")
     if tune_model:
-        print(f"  Tuning iters:    {n_iter}")
-    print(f"\nMethodology:")
-    print(f"  Coarsening:      Conservative SUM (mass-preserving)")
-    print(f"  Training:        Random Forest at 32×32")
-    print(f"  Upscaling:       Mass-conserving bilinear interpolation")
+        print(f"  Tuning iterations:  {n_iter}")
+        print(f"  Max trees:          1000")
     
     # Load data
     X_low, y_high, feature_names = load_data(data_path)
@@ -581,7 +787,7 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print(f"  Training:   {train_size} days")
     print(f"  Validation: {val_size} days")
     
-    # Conservative coarsening to 32×32 (SUM, not MEAN!)
+    # Conservative coarsening
     y_low = conservative_coarsen(y_high, coarse_shape=(32, 32))
     
     # Save coarsened target
@@ -595,7 +801,7 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     
     X_val = X_low[train_size:]
     y_val = y_low[train_size:]
-    y_val_high = y_high[train_size:]  # Keep for final evaluation
+    y_val_high = y_high[train_size:]
     
     # Initialize model
     rf = RFWithTuning(n_jobs=-1, random_state=42)
@@ -604,25 +810,18 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     X_train_flat, y_train_flat = rf.prepare_data(X_train, y_train, save_dir, 'train')
     X_val_flat, y_val_flat = rf.prepare_data(X_val, y_val, save_dir, 'val')
     
-    # Hyperparameter tuning or use default parameters
+    # Hyperparameter tuning
     if tune_model:
         best_params, best_cv_score = rf.hyperparameter_tuning(
             X_train_flat, y_train_flat, 
             X_val_flat, y_val_flat,
-            n_iter=n_iter, cv=3
+            n_iter=n_iter, cv=3, 
+            save_dir=save_dir  # Pass save_dir to save results
         )
         
-        # Save tuning results
-        tuning_path = os.path.join(save_dir, 'tuning_results.npz')
-        np.savez_compressed(tuning_path, 
-                           best_params=best_params,
-                           best_cv_score=best_cv_score)
-        print(f"\n✓ Saved tuning results: {tuning_path}")
-        
-        # Train final model on full training data
+        # Train final model
         rf.train_best_model(X_train_flat, y_train_flat, best_params)
     else:
-        # Use default parameters
         print("\n⚠ Skipping tuning, using default parameters...")
         default_params = {
             'n_estimators': 300,
@@ -639,7 +838,7 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     model_path = os.path.join(save_dir, 'best_rf_model.pkl')
     rf.save_model(model_path)
     
-    # Predictions at coarse resolution
+    # Predictions
     y_train_pred = rf.predict(X_train_flat, X_train.shape[:3])
     y_val_pred = rf.predict(X_val_flat, X_val.shape[:3])
     
@@ -651,10 +850,10 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     train_metrics = rf.evaluate(y_train.squeeze(), y_train_pred, 'Training')
     val_metrics_coarse = rf.evaluate(y_val.squeeze(), y_val_pred, 'Validation')
     
-    # Feature importance (Gini)
+    # Feature importance
     importance = rf.plot_feature_importance(feature_names, save_dir)
     
-    # Mass-conserving upscaling to 320×320
+    # Mass-conserving upscaling
     val_pred_fine_path = os.path.join(save_dir, 'val_predictions_upscaled_320x320.npy')
     y_val_pred_fine = rf.mass_conserving_upscale(y_val_pred, (320, 320), val_pred_fine_path)
     
@@ -671,7 +870,7 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     mae_fine = mean_absolute_error(y_val_high_flat, y_val_pred_fine_flat)
     
     print(f"\nFine-resolution metrics (320×320):")
-    print(f"  R²:   {r2_fine:.4f}")
+    print(f"  R²:   {r2_fine:.6f}")
     print(f"  RMSE: {rmse_fine:.4f} mm/day")
     print(f"  MAE:  {mae_fine:.4f} mm/day")
     
@@ -695,21 +894,24 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print("✓ PIPELINE COMPLETED!")
     print('='*80)
     print(f"\nKey outputs in {save_dir}:")
-    print(f"  best_rf_model.pkl                      - Trained model")
-    print(f"  gini_importance.npz & .png             - Feature importance")
-    print(f"  val_predictions_upscaled_320x320.npy   - Final predictions (mass-conserving)")
-    print(f"  metrics.npz                            - Performance metrics (coarse + fine)")
-    if tune_model:
-        print(f"  tuning_results.npz                     - Hyperparameter search")
+    print(f"  best_rf_model.pkl                         - Trained model")
+    print(f"  best_params.json                          - Best hyperparameters")
+    print(f"  cv_results_all.csv                        - All CV results")
+    print(f"  cv_results_top50.csv                      - Top 50 configurations")
+    print(f"  tuning_summary.txt                        - Tuning summary")
+    print(f"  hyperparameter_importance.png             - Parameter visualization")
+    print(f"  search_progress.png                       - Search progress")
+    print(f"  n_estimators_effect.png                   - Trees effect")
+    print(f"  gini_importance.npz & .png                - Feature importance")
+    print(f"  val_predictions_upscaled_320x320.npy      - Final predictions")
+    print(f"  metrics.npz                               - Performance metrics")
     print('='*80)
     print(f"\nPerformance Summary:")
-    print(f"  Coarse (32×32):  R² = {val_metrics_coarse['r2']:.4f}")
-    print(f"  Fine (320×320):  R² = {val_metrics_fine['r2']:.4f}, RMSE = {rmse_fine:.4f} mm/day")
+    print(f"  Coarse (32×32):  R² = {val_metrics_coarse['r2']:.6f}")
+    print(f"  Fine (320×320):  R² = {val_metrics_fine['r2']:.6f}, RMSE = {rmse_fine:.4f} mm/day")
     print('='*80)
     
     return rf, y_val_pred_fine, val_metrics_fine
-
-
 
 if __name__ == "__main__":
     import sys
@@ -717,14 +919,15 @@ if __name__ == "__main__":
     if len(sys.argv) >= 3:
         train_size = int(sys.argv[3]) if len(sys.argv) >= 4 else 11323
         tune = sys.argv[4].lower() == 'true' if len(sys.argv) >= 5 else True
+        n_iter = int(sys.argv[5]) if len(sys.argv) >= 6 else 50
         
         rf, predictions, metrics = main_pipeline(
             data_path=sys.argv[1],
             save_dir=sys.argv[2],
             train_size=train_size,
             tune_model=tune,
-            n_iter=20
+            n_iter=n_iter
         )
     else:
-        print("Usage: python rf_mass_conserving.py <DATA_PATH> <SAVE_DIR> [TRAIN_SIZE] [TUNE]")
-        print("Example: python rf_mass_conserving.py /data /output 11323 true")
+        print("Usage: python rf_extended_tuning.py <DATA_PATH> <SAVE_DIR> [TRAIN_SIZE] [TUNE] [N_ITER]")
+        print("Example: python rf_extended_tuning.py /data /output 11323 true 50")
