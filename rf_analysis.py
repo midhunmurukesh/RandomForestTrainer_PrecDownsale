@@ -1,5 +1,6 @@
-# v2.0: RF Perfect Prognosis with Hyperparameter Tuning
-# Train at coarse (32x32), validate against MSWX, find best model
+# v2.1: RF Perfect Prognosis with Conservative Remapping & Mass Conservation
+# Train at coarse (32x32), validate against MSWX, with mass-conserving upscaling
+
 
 import numpy as np
 from scipy.ndimage import zoom
@@ -13,7 +14,9 @@ from tqdm import tqdm
 import time
 import pickle
 
+
 warnings.filterwarnings('ignore')
+
 
 
 class RFWithTuning:
@@ -22,9 +25,9 @@ class RFWithTuning:
     
     Methodology:
     1. Train at coarse resolution (32×32) using atmospheric predictors
-    2. Validate against coarse-averaged MSWX precipitation
+    2. Use CONSERVATIVE SUM for coarsening (preserves extremes)
     3. Tune hyperparameters to find best model
-    4. Upscale best model predictions to fine resolution (320×320)
+    4. Upscale predictions with MASS-CONSERVING bilinear interpolation
     """
     
     def __init__(self, n_jobs=-1, random_state=42):
@@ -66,9 +69,8 @@ class RFWithTuning:
         # Statistics
         print(f"\nData statistics:")
         print(f"  X range: [{X_flat.min():.4f}, {X_flat.max():.4f}]")
-        print(f"  y range: [{y_flat.min():.4f}, {y_flat.max():.4f}] mm/day")
-        print(f"  y mean:  {y_flat.mean():.4f} mm/day")
-        print(f"  Wet %:   {(y_flat >= 1.0).mean()*100:.2f}%")
+        print(f"  y range: [{y_flat.min():.4f}, {y_flat.max():.4f}] mm (total per cell)")
+        print(f"  y mean:  {y_flat.mean():.4f} mm (total per cell)")
         
         return X_flat, y_flat
     
@@ -90,33 +92,16 @@ class RFWithTuning:
         print("HYPERPARAMETER TUNING")
         print('='*80)
         
-        # -------------------------------------------------------------------------------------
-        
-        # # Define parameter grid # Fast Config
-        # param_distributions = {
-        #     'n_estimators': [50, 100, 150, 200],
-        #     'max_depth': [10, 15, 20, 25, 30, None],
-        #     'min_samples_split': [10, 20, 50, 100],
-        #     'min_samples_leaf': [5, 10, 20],
-        #     'max_features': ['sqrt', 'log2', 0.3, 0.5],
-        #     'bootstrap': [True],
-        #     'max_samples': [0.7, 0.8, 0.9, 1.0]
-        # }
-        
-        # -------------------------------------------------------------------------------------
-        
-        # Example: If Phase 1 found max_depth=30, n_estimators=200 work well
+        # Refined parameter grid
         param_distributions = {
-            'n_estimators': [200, 300, 400, 500],           # Around best from Phase 1
-            'max_depth': [25, 30, 35, 40],                  # Around best from Phase 1
-            'min_samples_split': [10, 15, 20, 30],          # Refined range
-            'min_samples_leaf': [5, 7, 10, 15],             # Refined range
-            'max_features': [0.25, 0.3, 0.35, 'sqrt'],      # Refined range
+            'n_estimators': [200, 300, 400, 500],
+            'max_depth': [25, 30, 35, 40],
+            'min_samples_split': [10, 15, 20, 30],
+            'min_samples_leaf': [5, 7, 10, 15],
+            'max_features': [0.25, 0.3, 0.35, 'sqrt'],
             'bootstrap': [True],
-            'max_samples': [0.75, 0.8, 0.85, 0.9]           # Refined range
+            'max_samples': [0.75, 0.8, 0.85, 0.9]
         }
-
-        # -------------------------------------------------------------------------------------
         
         print(f"\nParameter search space:")
         for param, values in param_distributions.items():
@@ -129,7 +114,7 @@ class RFWithTuning:
         print(f"  Scoring:          R² (coefficient of determination)")
         print(f"  Total fits:       {n_iter * cv}")
         
-        # Subsample training data for faster tuning (optional)
+        # Subsample training data for faster tuning
         max_tuning_samples = 50000
         if X_train.shape[0] > max_tuning_samples:
             print(f"\n⚠ Subsampling to {max_tuning_samples:,} samples for faster tuning...")
@@ -157,7 +142,7 @@ class RFWithTuning:
             n_iter=n_iter,
             cv=cv,
             scoring='r2',
-            n_jobs=1,  # Parallel at tree level, not CV level
+            n_jobs=1,
             verbose=2,
             random_state=self.random_state,
             return_train_score=True
@@ -198,8 +183,8 @@ class RFWithTuning:
         val_mae = mean_absolute_error(y_val, y_val_pred)
         
         print(f"  Validation R²:    {val_r2:.4f}")
-        print(f"  Validation RMSE:  {val_rmse:.4f} mm/day")
-        print(f"  Validation MAE:   {val_mae:.4f} mm/day")
+        print(f"  Validation RMSE:  {val_rmse:.4f} mm")
+        print(f"  Validation MAE:   {val_mae:.4f} mm")
         
         # Store best estimator
         self.best_model = search.best_estimator_
@@ -209,12 +194,6 @@ class RFWithTuning:
     def train_best_model(self, X_train, y_train, best_params):
         """
         Train final model with best parameters on full training data
-        
-        Parameters:
-        -----------
-        X_train : array
-        y_train : array
-        best_params : dict - best hyperparameters from tuning
         """
         print(f"\n{'='*80}")
         print("TRAINING FINAL MODEL WITH BEST PARAMETERS")
@@ -248,7 +227,7 @@ class RFWithTuning:
     def predict(self, X_test, original_shape):
         """Predict and reshape to original spatial dimensions"""
         print(f"\n{'='*80}")
-        print("PREDICTION")
+        print("PREDICTION AT COARSE RESOLUTION")
         print('='*80)
         
         print(f"Predicting for {X_test.shape[0]:,} samples...")
@@ -266,15 +245,15 @@ class RFWithTuning:
         
         print(f"\nPrediction statistics:")
         print(f"  Shape: {y_pred.shape}")
-        print(f"  Range: [{y_pred.min():.4f}, {y_pred.max():.4f}] mm/day")
-        print(f"  Mean:  {y_pred.mean():.4f} mm/day")
+        print(f"  Range: [{y_pred.min():.4f}, {y_pred.max():.4f}] mm (total per cell)")
+        print(f"  Mean:  {y_pred.mean():.4f} mm (total per cell)")
         
         return y_pred
     
     def evaluate(self, y_true, y_pred, prefix='Validation'):
-        """Calculate evaluation metrics"""
+        """Calculate evaluation metrics at coarse resolution"""
         print(f"\n{'='*80}")
-        print(f"{prefix.upper()} METRICS")
+        print(f"{prefix.upper()} METRICS (COARSE RESOLUTION)")
         print('='*80)
         
         y_true_flat = y_true.flatten()
@@ -284,31 +263,12 @@ class RFWithTuning:
         rmse = np.sqrt(mean_squared_error(y_true_flat, y_pred_flat))
         mae = mean_absolute_error(y_true_flat, y_pred_flat)
         
-        # Precipitation-specific metrics
-        wet_threshold = 1.0
-        wet_mask_true = y_true_flat >= wet_threshold
-        wet_mask_pred = y_pred_flat >= wet_threshold
-        
-        # Wet day detection
-        true_positives = np.sum(wet_mask_true & wet_mask_pred)
-        false_positives = np.sum(~wet_mask_true & wet_mask_pred)
-        false_negatives = np.sum(wet_mask_true & ~wet_mask_pred)
-        
-        pod = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-        far = false_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-        
         print(f"\nOverall metrics:")
         print(f"  R² (coefficient of determination): {r2:.4f}")
-        print(f"  RMSE (mm/day):                     {rmse:.4f}")
-        print(f"  MAE (mm/day):                      {mae:.4f}")
+        print(f"  RMSE (mm total per cell):          {rmse:.4f}")
+        print(f"  MAE (mm total per cell):           {mae:.4f}")
         
-        print(f"\nWet day detection (threshold = {wet_threshold} mm/day):")
-        print(f"  POD (Probability of Detection):    {pod:.4f}")
-        print(f"  FAR (False Alarm Ratio):           {far:.4f}")
-        print(f"  True wet days:                     {wet_mask_true.sum():,}")
-        print(f"  Predicted wet days:                {wet_mask_pred.sum():,}")
-        
-        return {'r2': r2, 'rmse': rmse, 'mae': mae, 'pod': pod, 'far': far}
+        return {'r2': r2, 'rmse': rmse, 'mae': mae}
     
     def plot_feature_importance(self, feature_names, save_dir):
         """Plot Gini importance for best model"""
@@ -363,32 +323,89 @@ class RFWithTuning:
         
         return importance
     
-    def upscale_to_fine(self, y_coarse, target_shape=(320, 320), save_path=None):
-        """Bilinear upscaling from 32×32 to 320×320"""
+    def mass_conserving_upscale(self, y_coarse, target_shape=(320, 320), save_path=None):
+        """
+        Mass-conserving bilinear upscaling from 32×32 to 320×320
+        Ensures exact mass conservation within each coarse cell
+        """
         print(f"\n{'='*80}")
-        print("UPSCALING TO FINE RESOLUTION")
+        print("MASS-CONSERVING UPSCALING TO FINE RESOLUTION")
         print('='*80)
         
         t, h_low, w_low = y_coarse.shape
         h_high, w_high = target_shape
         
-        print(f"Upscaling from {h_low}×{w_low} to {h_high}×{w_high}")
+        factor_h = h_high // h_low
+        factor_w = w_high // w_low
         
+        print(f"Upscaling from {h_low}×{w_low} to {h_high}×{w_high}")
+        print(f"Upscaling factor: {factor_h}×{factor_w}")
+        print(f"Method: Bilinear interpolation + mass conservation correction")
+        
+        # Step 1: Bilinear interpolation
+        print(f"\nStep 1: Bilinear interpolation...")
+        start_time = time.time()
         zoom_factors = (1, h_high/h_low, w_high/w_low)
+        y_fine_interp = zoom(y_coarse, zoom_factors, order=1, mode='nearest')
+        elapsed = time.time() - start_time
+        print(f"✓ Completed in {elapsed:.1f}s")
+        
+        print(f"\nBefore mass correction:")
+        print(f"  Coarse total: {y_coarse.sum():,.2f} mm")
+        print(f"  Fine total:   {y_fine_interp.sum():,.2f} mm")
+        print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_interp.sum())/y_coarse.sum()*100:.2f}%")
+        
+        # Step 2: Mass conservation correction
+        print(f"\nStep 2: Applying mass conservation correction...")
+        y_fine_corrected = np.zeros_like(y_fine_interp)
         
         start_time = time.time()
-        y_fine = zoom(y_coarse, zoom_factors, order=1, mode='nearest')
-        elapsed = time.time() - start_time
+        for ti in tqdm(range(t), desc="Mass correction"):
+            for i in range(h_low):
+                for j in range(w_low):
+                    # Target: coarse cell sum
+                    target_sum = y_coarse[ti, i, j]
+                    
+                    # Current: interpolated fine cells in this box
+                    fine_box = y_fine_interp[ti, 
+                                            i*factor_h:(i+1)*factor_h,
+                                            j*factor_w:(j+1)*factor_w]
+                    current_sum = fine_box.sum()
+                    
+                    # Multiplicative correction (preserves spatial pattern)
+                    if current_sum > 0:
+                        correction_factor = target_sum / current_sum
+                        y_fine_corrected[ti,
+                                        i*factor_h:(i+1)*factor_h,
+                                        j*factor_w:(j+1)*factor_w] = fine_box * correction_factor
+                    else:
+                        # Uniform distribution if interpolation gave zero
+                        uniform_val = target_sum / (factor_h * factor_w)
+                        y_fine_corrected[ti,
+                                        i*factor_h:(i+1)*factor_h,
+                                        j*factor_w:(j+1)*factor_w] = uniform_val
         
-        print(f"✓ Completed in {elapsed:.1f}s")
-        print(f"  Shape: {y_fine.shape}")
-        print(f"  Mean:  {y_fine.mean():.4f} mm/day")
+        elapsed = time.time() - start_time
+        print(f"✓ Correction completed in {elapsed:.1f}s")
+        
+        print(f"\nAfter mass correction:")
+        print(f"  Fine total:   {y_fine_corrected.sum():,.2f} mm")
+        print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_corrected.sum())/y_coarse.sum()*100:.8f}%")
+        
+        # Convert from total mm to mm/day (average over fine cells)
+        y_fine_mmday = y_fine_corrected / (factor_h * factor_w)
+        
+        print(f"\nFinal fine-resolution predictions:")
+        print(f"  Shape:  {y_fine_mmday.shape}")
+        print(f"  Range:  [{y_fine_mmday.min():.4f}, {y_fine_mmday.max():.4f}] mm/day")
+        print(f"  Mean:   {y_fine_mmday.mean():.4f} mm/day")
+        print(f"  99th:   {np.percentile(y_fine_mmday, 99):.4f} mm/day")
         
         if save_path:
-            np.save(save_path, y_fine)
+            np.save(save_path, y_fine_mmday)
             print(f"✓ Saved to: {save_path}")
         
-        return y_fine
+        return y_fine_mmday
     
     def save_model(self, save_path):
         """Save trained model"""
@@ -397,10 +414,16 @@ class RFWithTuning:
         print(f"✓ Model saved to: {save_path}")
 
 
-def upscale_precipitation_coarse(y_high, coarse_shape=(32, 32)):
-    """Box averaging to coarse resolution"""
+
+def conservative_coarsen(y_high, coarse_shape=(32, 32)):
+    """
+    Conservative remapping using SUM (vectorized, 100× faster!)
+    - Preserves total precipitation mass
+    - Maintains extreme values
+    - Compatible with mass-conserving upscaling
+    """
     print(f"\n{'='*80}")
-    print("COARSENING PRECIPITATION (BOX AVERAGING)")
+    print("CONSERVATIVE COARSENING (SUM)")
     print('='*80)
     
     t, h_high, w_high, c = y_high.shape
@@ -410,23 +433,48 @@ def upscale_precipitation_coarse(y_high, coarse_shape=(32, 32)):
     factor_w = w_high // w_coarse
     
     print(f"From {h_high}×{w_high} to {h_coarse}×{w_coarse}")
-    print(f"Box size: {factor_h}×{factor_w}")
+    print(f"Box size: {factor_h}×{factor_w} = {factor_h*factor_w} pixels per coarse cell")
+    print(f"Method: CONSERVATIVE SUM (mass-preserving)")
     
-    y_coarse = np.zeros((t, h_coarse, w_coarse, c), dtype=np.float32)
+    start_time = time.time()
     
-    for ti in tqdm(range(t), desc="Coarsening"):
-        for i in range(h_coarse):
-            for j in range(w_coarse):
-                y_coarse[ti, i, j, 0] = np.mean(
-                    y_high[ti, i*factor_h:(i+1)*factor_h, 
-                           j*factor_w:(j+1)*factor_w, 0]
-                )
+    # VECTORIZED APPROACH (no loops over space!)
+    # Reshape to separate coarse and fine dimensions
+    y_reshaped = y_high[:, :, :, 0].reshape(
+        t, 
+        h_coarse, factor_h,
+        w_coarse, factor_w
+    )
     
-    print(f"\n✓ Mass preserved:")
-    print(f"  Fine mean:   {y_high.mean():.4f} mm/day")
-    print(f"  Coarse mean: {y_coarse.mean():.4f} mm/day")
+    # Sum over fine-scale dimensions (axis 2 and 4)
+    y_coarse_3d = y_reshaped.sum(axis=(2, 4))
+    
+    # Reshape to 4D
+    y_coarse = y_coarse_3d.reshape(t, h_coarse, w_coarse, 1).astype(np.float32)
+    
+    elapsed = time.time() - start_time
+    print(f"\n✓ Coarsening completed in {elapsed:.1f}s")
+    
+    # Validation
+    fine_total = y_high.sum()
+    coarse_total = y_coarse.sum()
+    mass_error = abs(fine_total - coarse_total) / fine_total * 100
+    
+    print(f"\n✓ Mass conservation:")
+    print(f"  Fine total:     {fine_total:,.2f} mm")
+    print(f"  Coarse total:   {coarse_total:,.2f} mm")
+    print(f"  Error:          {mass_error:.8f}% (perfect = 0%)")
+    
+    print(f"\n✓ Value preservation:")
+    print(f"  Fine mean:      {y_high.mean():.4f} mm/day")
+    print(f"  Coarse mean:    {y_coarse.mean():.4f} mm (total per cell)")
+    print(f"  Fine max:       {y_high.max():.2f} mm/day")
+    print(f"  Coarse max:     {y_coarse.max():.2f} mm (total per cell)")
+    print(f"  Fine 99th:      {np.percentile(y_high, 99):.2f} mm/day")
+    print(f"  Coarse 99th:    {np.percentile(y_coarse, 99):.2f} mm (total per cell)")
     
     return y_coarse
+
 
 
 def load_data(data_path):
@@ -492,9 +540,10 @@ def load_data(data_path):
     return X_low, y_high, feature_names
 
 
+
 def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter=20):
     """
-    Complete RF pipeline with hyperparameter tuning
+    Complete RF pipeline with conservative remapping and mass conservation
     
     Parameters:
     -----------
@@ -507,7 +556,7 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     os.makedirs(save_dir, exist_ok=True)
     
     print("\n" + "="*80)
-    print("RANDOM FOREST WITH HYPERPARAMETER TUNING")
+    print("RF PERFECT PROGNOSIS WITH MASS CONSERVATION")
     print("="*80)
     print(f"\nConfiguration:")
     print(f"  Data path:       {data_path}")
@@ -516,6 +565,10 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print(f"  Tuning enabled:  {tune_model}")
     if tune_model:
         print(f"  Tuning iters:    {n_iter}")
+    print(f"\nMethodology:")
+    print(f"  Coarsening:      Conservative SUM (mass-preserving)")
+    print(f"  Training:        Random Forest at 32×32")
+    print(f"  Upscaling:       Mass-conserving bilinear interpolation")
     
     # Load data
     X_low, y_high, feature_names = load_data(data_path)
@@ -528,13 +581,13 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print(f"  Training:   {train_size} days")
     print(f"  Validation: {val_size} days")
     
-    # Coarsen precipitation to 32×32
-    y_low = upscale_precipitation_coarse(y_high, coarse_shape=(32, 32))
+    # Conservative coarsening to 32×32 (SUM, not MEAN!)
+    y_low = conservative_coarsen(y_high, coarse_shape=(32, 32))
     
     # Save coarsened target
-    y_low_path = os.path.join(save_dir, 'precipitation_coarse_32x32.npy')
+    y_low_path = os.path.join(save_dir, 'precipitation_coarse_32x32_sum.npy')
     np.save(y_low_path, y_low)
-    print(f"\n✓ Saved: {y_low_path}")
+    print(f"\n✓ Saved coarse precipitation: {y_low_path}")
     
     # Split data
     X_train = X_low[:train_size]
@@ -542,6 +595,7 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     
     X_val = X_low[train_size:]
     y_val = y_low[train_size:]
+    y_val_high = y_high[train_size:]  # Keep for final evaluation
     
     # Initialize model
     rf = RFWithTuning(n_jobs=-1, random_state=42)
@@ -571,12 +625,13 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
         # Use default parameters
         print("\n⚠ Skipping tuning, using default parameters...")
         default_params = {
-            'n_estimators': 100,
-            'max_depth': 20,
+            'n_estimators': 300,
+            'max_depth': 30,
             'min_samples_split': 10,
             'min_samples_leaf': 5,
             'max_features': 'sqrt',
-            'bootstrap': True
+            'bootstrap': True,
+            'max_samples': 0.8
         }
         rf.train_best_model(X_train_flat, y_train_flat, default_params)
     
@@ -594,26 +649,45 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     
     # Evaluate at coarse resolution
     train_metrics = rf.evaluate(y_train.squeeze(), y_train_pred, 'Training')
-    val_metrics = rf.evaluate(y_val.squeeze(), y_val_pred, 'Validation')
-    
-    # Save metrics
-    metrics_path = os.path.join(save_dir, 'metrics.npz')
-    np.savez_compressed(metrics_path, 
-                       train=train_metrics,
-                       val=val_metrics)
-    print(f"\n✓ Saved metrics: {metrics_path}")
+    val_metrics_coarse = rf.evaluate(y_val.squeeze(), y_val_pred, 'Validation')
     
     # Feature importance (Gini)
     importance = rf.plot_feature_importance(feature_names, save_dir)
     
-    # Upscale validation predictions to 320×320
+    # Mass-conserving upscaling to 320×320
     val_pred_fine_path = os.path.join(save_dir, 'val_predictions_upscaled_320x320.npy')
-    y_val_pred_fine = rf.upscale_to_fine(y_val_pred, (320, 320), val_pred_fine_path)
+    y_val_pred_fine = rf.mass_conserving_upscale(y_val_pred, (320, 320), val_pred_fine_path)
+    
+    # Evaluate at fine resolution
+    print(f"\n{'='*80}")
+    print("FINE RESOLUTION EVALUATION")
+    print('='*80)
+    
+    y_val_high_flat = y_val_high.flatten()
+    y_val_pred_fine_flat = y_val_pred_fine.flatten()
+    
+    r2_fine = r2_score(y_val_high_flat, y_val_pred_fine_flat)
+    rmse_fine = np.sqrt(mean_squared_error(y_val_high_flat, y_val_pred_fine_flat))
+    mae_fine = mean_absolute_error(y_val_high_flat, y_val_pred_fine_flat)
+    
+    print(f"\nFine-resolution metrics (320×320):")
+    print(f"  R²:   {r2_fine:.4f}")
+    print(f"  RMSE: {rmse_fine:.4f} mm/day")
+    print(f"  MAE:  {mae_fine:.4f} mm/day")
+    
+    val_metrics_fine = {'r2': r2_fine, 'rmse': rmse_fine, 'mae': mae_fine}
+    
+    # Save all metrics
+    metrics_path = os.path.join(save_dir, 'metrics.npz')
+    np.savez_compressed(metrics_path, 
+                       train_coarse=train_metrics,
+                       val_coarse=val_metrics_coarse,
+                       val_fine=val_metrics_fine)
+    print(f"\n✓ Saved metrics: {metrics_path}")
     
     # Save fine-resolution target
-    y_val_fine = y_high[train_size:]
     val_target_path = os.path.join(save_dir, 'val_target_fine_320x320.npy')
-    np.save(val_target_path, y_val_fine.squeeze())
+    np.save(val_target_path, y_val_high.squeeze())
     print(f"✓ Saved target: {val_target_path}")
     
     # Final summary
@@ -623,13 +697,18 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print(f"\nKey outputs in {save_dir}:")
     print(f"  best_rf_model.pkl                      - Trained model")
     print(f"  gini_importance.npz & .png             - Feature importance")
-    print(f"  val_predictions_upscaled_320x320.npy   - Final predictions")
-    print(f"  metrics.npz                            - Performance metrics")
+    print(f"  val_predictions_upscaled_320x320.npy   - Final predictions (mass-conserving)")
+    print(f"  metrics.npz                            - Performance metrics (coarse + fine)")
     if tune_model:
         print(f"  tuning_results.npz                     - Hyperparameter search")
     print('='*80)
+    print(f"\nPerformance Summary:")
+    print(f"  Coarse (32×32):  R² = {val_metrics_coarse['r2']:.4f}")
+    print(f"  Fine (320×320):  R² = {val_metrics_fine['r2']:.4f}, RMSE = {rmse_fine:.4f} mm/day")
+    print('='*80)
     
-    return rf, y_val_pred_fine, val_metrics
+    return rf, y_val_pred_fine, val_metrics_fine
+
 
 
 if __name__ == "__main__":
@@ -647,5 +726,5 @@ if __name__ == "__main__":
             n_iter=20
         )
     else:
-        print("Usage: python rf_tuned.py <DATA_PATH> <SAVE_DIR> [TRAIN_SIZE] [TUNE]")
-        print("Example: python rf_tuned.py /data /output 11323 true")
+        print("Usage: python rf_mass_conserving.py <DATA_PATH> <SAVE_DIR> [TRAIN_SIZE] [TUNE]")
+        print("Example: python rf_mass_conserving.py /data /output 11323 true")
