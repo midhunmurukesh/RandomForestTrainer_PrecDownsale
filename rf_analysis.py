@@ -1,5 +1,5 @@
-# v2.3: RF with Memory-Optimized Batched Prediction & Robust Error Handling
-# Fixed memory issues and ensured all outputs are generated
+# v2.4: RF with Mean-Pooled Coarsening & NetCDF Export
+# Fixed coarsening to use MEAN (not SUM) + NetCDF output generation
 
 import numpy as np
 from scipy.ndimage import zoom
@@ -15,8 +15,18 @@ import time
 import pickle
 import json
 import gc
+import logging
+from pathlib import Path
 
 warnings.filterwarnings('ignore')
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("RFPipeline")
 
 
 class RFWithTuning:
@@ -65,8 +75,8 @@ class RFWithTuning:
         # Statistics
         print(f"\nData statistics:")
         print(f"  X range: [{X_flat.min():.4f}, {X_flat.max():.4f}]")
-        print(f"  y range: [{y_flat.min():.4f}, {y_flat.max():.4f}] mm (total per cell)")
-        print(f"  y mean:  {y_flat.mean():.4f} mm (total per cell)")
+        print(f"  y range: [{y_flat.min():.4f}, {y_flat.max():.4f}] mm/day (mean per cell)")
+        print(f"  y mean:  {y_flat.mean():.4f} mm/day (mean per cell)")
 
         return X_flat, y_flat
 
@@ -149,7 +159,7 @@ class RFWithTuning:
         try:
             search.fit(X_tune, y_tune)
         except Exception as e:
-            print(f"\n❌ Error during hyperparameter tuning: {e}")
+            print(f"\nError during hyperparameter tuning: {e}")
             raise
 
         elapsed = time.time() - start_time
@@ -204,8 +214,8 @@ class RFWithTuning:
         val_mae = mean_absolute_error(y_val, y_val_pred)
 
         print(f"  Validation R²:       {val_r2:.6f}")
-        print(f"  Validation RMSE:     {val_rmse:.4f} mm")
-        print(f"  Validation MAE:      {val_mae:.4f} mm")
+        print(f"  Validation RMSE:     {val_rmse:.4f} mm/day")
+        print(f"  Validation MAE:      {val_mae:.4f} mm/day")
 
         # Check for overfitting
         train_r2 = self.tuning_results['mean_train_score'][search.best_index_]
@@ -215,7 +225,7 @@ class RFWithTuning:
         print(f"  Test R² (CV):        {search.best_score_:.6f}")
         print(f"  Overfit gap:         {overfit_gap:.6f}")
         if overfit_gap > 0.05:
-            print(f"  ⚠ WARNING: Overfitting detected (gap > 0.05)")
+            print(f" [WARNING]: Overfitting detected (gap > 0.05)")
             print(f"  → Model may not generalize well to new data")
         else:
             print(f"  ✓ No significant overfitting")
@@ -345,7 +355,7 @@ class RFWithTuning:
         try:
             self.best_model.fit(X_train, y_train)
         except Exception as e:
-            print(f"\n❌ Error during model training: {e}")
+            print(f"\nError during model training: {e}")
             raise
 
         elapsed = time.time() - start_time
@@ -406,8 +416,8 @@ class RFWithTuning:
 
         print(f"\nPrediction statistics:")
         print(f"  Shape: {y_pred.shape}")
-        print(f"  Range: [{y_pred.min():.4f}, {y_pred.max():.4f}] mm (total per cell)")
-        print(f"  Mean:  {y_pred.mean():.4f} mm (total per cell)")
+        print(f"  Range: [{y_pred.min():.4f}, {y_pred.max():.4f}] mm/day (mean per cell)")
+        print(f"  Mean:  {y_pred.mean():.4f} mm/day (mean per cell)")
 
         return y_pred
 
@@ -426,8 +436,8 @@ class RFWithTuning:
 
         print(f"\nOverall metrics:")
         print(f"  R²:   {r2:.6f}")
-        print(f"  RMSE: {rmse:.4f} mm")
-        print(f"  MAE:  {mae:.4f} mm")
+        print(f"  RMSE: {rmse:.4f} mm/day")
+        print(f"  MAE:  {mae:.4f} mm/day")
 
         return {'r2': r2, 'rmse': rmse, 'mae': mae}
 
@@ -483,10 +493,10 @@ class RFWithTuning:
 
         return importance
 
-    def mass_conserving_upscale(self, y_coarse, target_shape=(320, 320), save_path=None):
-        """Mass-conserving bilinear upscaling (geometric baseline)"""
+    def bilinear_upscale(self, y_coarse, target_shape=(320, 320), save_path=None):
+        """Simple bilinear interpolation upscaling"""
         print(f"\n{'='*80}")
-        print("MASS-CONSERVING UPSCALING TO FINE RESOLUTION")
+        print("BILINEAR UPSCALING TO FINE RESOLUTION")
         print('='*80)
 
         t, h_low, w_low = y_coarse.shape
@@ -499,54 +509,17 @@ class RFWithTuning:
         print(f"Upscaling factor: {factor_h}×{factor_w}")
 
         # Step 1: Bilinear interpolation
-        print(f"\nStep 1: Bilinear interpolation...")
+        print(f"\nApplying bilinear interpolation...")
         start_time = time.time()
         zoom_factors = (1, h_high/h_low, w_high/w_low)
         y_fine_interp = zoom(y_coarse, zoom_factors, order=1, mode='nearest')
         elapsed = time.time() - start_time
         print(f"✓ Completed in {elapsed:.1f}s")
 
-        print(f"\nBefore mass correction:")
-        print(f"  Coarse total: {y_coarse.sum():,.2f} mm")
-        print(f"  Fine total:   {y_fine_interp.sum():,.2f} mm")
-        print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_interp.sum())/y_coarse.sum()*100:.2f}%")
+        # For mean pooling, bilinear interpolation naturally preserves mean values
+        y_fine_mmday = y_fine_interp
 
-        # Step 2: Mass conservation correction
-        print(f"\nStep 2: Mass conservation correction...")
-        y_fine_corrected = np.zeros_like(y_fine_interp)
-
-        start_time = time.time()
-        for ti in tqdm(range(t), desc="Mass correction"):
-            for i in range(h_low):
-                for j in range(w_low):
-                    target_sum = y_coarse[ti, i, j]
-                    fine_box = y_fine_interp[ti,
-                                             i*factor_h:(i+1)*factor_h,
-                                             j*factor_w:(j+1)*factor_w]
-                    current_sum = fine_box.sum()
-
-                    if current_sum > 0:
-                        y_fine_corrected[ti,
-                                         i*factor_h:(i+1)*factor_h,
-                                         j*factor_w:(j+1)*factor_w] = \
-                            fine_box * (target_sum / current_sum)
-                    else:
-                        y_fine_corrected[ti,
-                                         i*factor_h:(i+1)*factor_h,
-                                         j*factor_w:(j+1)*factor_w] = \
-                            target_sum / (factor_h * factor_w)
-
-        elapsed = time.time() - start_time
-        print(f"✓ Correction completed in {elapsed:.1f}s")
-
-        print(f"\nAfter mass correction:")
-        print(f"  Fine total:   {y_fine_corrected.sum():,.2f} mm")
-        print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_corrected.sum())/y_coarse.sum()*100:.8f}%")
-
-        # Convert from total mm to mm/day
-        y_fine_mmday = y_fine_corrected / (factor_h * factor_w)
-
-        print(f"\nFinal fine-resolution predictions:")
+        print(f"\nFinal upscaled predictions:")
         print(f"  Shape:  {y_fine_mmday.shape}")
         print(f"  Range:  [{y_fine_mmday.min():.4f}, {y_fine_mmday.max():.4f}] mm/day")
         print(f"  Mean:   {y_fine_mmday.mean():.4f} mm/day")
@@ -554,94 +527,7 @@ class RFWithTuning:
         if save_path:
             np.save(save_path, y_fine_mmday)
             print(f"✓ Saved to: {save_path}")
-            print(f"  File size: {os.path.getsize(save_path) / 1e9:.2f} GB")
-
-        return y_fine_mmday
-
-    def mass_conserving_upscale_dem(self, y_coarse, dem_high, target_shape=(320, 320),
-                                    alpha=1.0, eps=1e-6, save_path=None):
-        """
-        DEM-aware mass-conserving bilinear upscaling (orographic baseline).
-        Uses bilinear interpolation as a shape prior, then redistributes each coarse total
-        across its fine 10×10 subgrid using weights (interp + eps) * exp(alpha * DEM),
-        preserving the coarse 32×32 totals.
-        """
-        print(f"\n{'='*80}")
-        print("DEM-AWARE MASS-CONSERVING UPSCALING TO FINE RESOLUTION")
-        print('='*80)
-
-        t, h_low, w_low = y_coarse.shape
-        h_high, w_high = target_shape
-        factor_h = h_high // h_low
-        factor_w = w_high // w_low
-
-        if dem_high.shape != (t, h_high, w_high):
-            raise ValueError(f"dem_high shape {dem_high.shape} not compatible with "
-                             f"y_coarse {y_coarse.shape} and target {target_shape}")
-
-        print(f"Upscaling from {h_low}×{w_low} to {h_high}×{w_high}")
-        print(f"Upscaling factor: {factor_h}×{factor_w}")
-        print(f"DEM weighting alpha = {alpha}")
-
-        # Step 1: Bilinear interpolation
-        print(f"\nStep 1: Bilinear interpolation...")
-        start_time = time.time()
-        zoom_factors = (1, h_high/h_low, w_high/w_low)
-        y_fine_interp = zoom(y_coarse, zoom_factors, order=1, mode='nearest')
-        elapsed = time.time() - start_time
-        print(f"✓ Completed in {elapsed:.1f}s")
-
-        print(f"\nBefore DEM-based mass correction:")
-        print(f"  Coarse total: {y_coarse.sum():,.2f} mm")
-        print(f"  Fine total:   {y_fine_interp.sum():,.2f} mm")
-        print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_interp.sum())/y_coarse.sum()*100:.2f}%")
-
-        # Step 2: DEM-aware mass conservation
-        print(f"\nStep 2: DEM-aware mass conservation correction...")
-        y_fine_corrected = np.zeros_like(y_fine_interp, dtype=np.float32)
-
-        start_time = time.time()
-        for ti in tqdm(range(t), desc="DEM mass correction"):
-            for i in range(h_low):
-                i0 = i * factor_h
-                i1 = (i + 1) * factor_h
-                for j in range(w_low):
-                    j0 = j * factor_w
-                    j1 = (j + 1) * factor_w
-
-                    target_sum = y_coarse[ti, i, j]
-                    fine_box = y_fine_interp[ti, i0:i1, j0:j1]
-                    dem_box = dem_high[ti, i0:i1, j0:j1]
-
-                    w = (fine_box + eps) * np.exp(alpha * dem_box)
-                    w_sum = w.sum()
-
-                    if w_sum > 0 and target_sum > 0:
-                        y_fine_corrected[ti, i0:i1, j0:j1] = target_sum * w / w_sum
-                    elif target_sum > 0:
-                        y_fine_corrected[ti, i0:i1, j0:j1] = target_sum / (factor_h * factor_w)
-                    else:
-                        y_fine_corrected[ti, i0:i1, j0:j1] = 0.0
-
-        elapsed = time.time() - start_time
-        print(f"✓ DEM-aware correction completed in {elapsed:.1f}s")
-
-        print(f"\nAfter DEM-based mass correction:")
-        print(f"  Fine total:   {y_fine_corrected.sum():,.2f} mm")
-        print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_corrected.sum())/y_coarse.sum()*100:.8f}%")
-
-        # Convert from total mm to mm/day
-        y_fine_mmday = y_fine_corrected / (factor_h * factor_w)
-
-        print(f"\nFinal fine-resolution DEM-aware predictions:")
-        print(f"  Shape:  {y_fine_mmday.shape}")
-        print(f"  Range:  [{y_fine_mmday.min():.4f}, {y_fine_mmday.max():.4f}] mm/day")
-        print(f"  Mean:   {y_fine_mmday.mean():.4f} mm/day")
-
-        if save_path:
-            np.save(save_path, y_fine_mmday)
-            print(f"✓ Saved to: {save_path}")
-            print(f"  File size: {os.path.getsize(save_path) / 1e9:.2f} GB")
+            print(f"  File size: {os.path.getsize(save_path) / 1e6:.2f} MB")
 
         return y_fine_mmday
 
@@ -659,10 +545,10 @@ class RFWithTuning:
             print(f"  → Consider using more regularization (lower max_depth, higher min_samples_leaf)")
 
 
-def conservative_coarsen(y_high, coarse_shape=(32, 32)):
-    """Conservative remapping using SUM"""
+def mean_pool_coarsen(y_high, coarse_shape=(32, 32)):
+    """Mean pooling coarsening - appropriate for intensity variables (mm/day)"""
     print(f"\n{'='*80}")
-    print("CONSERVATIVE COARSENING (SUM)")
+    print("MEAN POOLING COARSENING")
     print('='*80)
 
     t, h_high, w_high, c = y_high.shape
@@ -672,30 +558,84 @@ def conservative_coarsen(y_high, coarse_shape=(32, 32)):
     factor_w = w_high // w_coarse
 
     print(f"From {h_high}×{w_high} to {h_coarse}×{w_coarse}")
-    print(f"Box size: {factor_h}×{factor_w}")
+    print(f"Pool size: {factor_h}×{factor_w}")
 
     start_time = time.time()
 
+    # Use MEAN for intensity variables (mm/day)
     y_reshaped = y_high[:, :, :, 0].reshape(t, h_coarse, factor_h, w_coarse, factor_w)
-    y_coarse_3d = y_reshaped.sum(axis=(2, 4))
+    y_coarse_3d = y_reshaped.mean(axis=(2, 4))
     y_coarse = y_coarse_3d.reshape(t, h_coarse, w_coarse, 1).astype(np.float32)
 
     elapsed = time.time() - start_time
     print(f"\n✓ Coarsening completed in {elapsed:.1f}s")
 
-    fine_total = y_high.sum()
-    coarse_total = y_coarse.sum()
+    fine_mean = y_high.mean()
+    coarse_mean = y_coarse.mean()
 
-    print(f"\n✓ Mass conservation:")
-    print(f"  Fine total:   {fine_total:,.2f} mm")
-    print(f"  Coarse total: {coarse_total:,.2f} mm")
-    print(f"  Error:        {abs(fine_total - coarse_total) / fine_total * 100:.8f}%")
+    print(f"\n✓ Mean preservation check:")
+    print(f"  Fine mean:   {fine_mean:.4f} mm/day")
+    print(f"  Coarse mean: {coarse_mean:.4f} mm/day")
+    print(f"  Difference:  {abs(fine_mean - coarse_mean) / fine_mean * 100:.8f}%")
 
     return y_coarse
 
 
+def create_netcdf_file(data, ref_ds_path, varname, start_date, end_date, 
+                       calendar, save_dir, filename, delete_existing_file=True):
+    """
+    Create NetCDF file from numpy array using ai4klima utility
+    
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Input array to convert to NetCDF
+    ref_ds_path : Path or str
+        Path to reference dataset for spatial metadata
+    varname : str
+        Variable name in NetCDF file
+    start_date : str
+        Start date (YYYY-MM-DD)
+    end_date : str
+        End date (YYYY-MM-DD)
+    calendar : str
+        Calendar type (e.g., 'standard')
+    save_dir : str
+        Directory to save NetCDF file
+    filename : str
+        Output filename (including .nc extension)
+    delete_existing_file : bool
+        Whether to overwrite existing file
+    """
+    try:
+        from ai4klima.utils import build_netcdf_from_array
+        
+        logger.info(f"Creating NetCDF: {filename}")
+        logger.info(f"  Data shape: {data.shape}")
+        logger.info(f"  Date range: {start_date} to {end_date}")
+        
+        build_netcdf_from_array(
+            data,
+            ref_ds=str(ref_ds_path),
+            varname=varname,
+            start_date=start_date,
+            end_date=end_date,
+            calendar=calendar,
+            save_dir=save_dir,
+            filename=filename,
+            delete_existing_file=delete_existing_file,
+        )
+        logger.info(f"✓ NetCDF file created: {filename}")
+        
+    except ImportError:
+        logger.warning("ai4klima not available - skipping NetCDF creation")
+    except Exception as e:
+        logger.exception(f"NetCDF creation failed: {e}")
+        raise
+
+
 def load_data(data_path):
-    """Load atmospheric and precipitation data and high-res DEM"""
+    """Load atmospheric and precipitation data"""
     print(f"\n{'='*80}")
     print("LOADING DATA")
     print('='*80)
@@ -732,7 +672,6 @@ def load_data(data_path):
     }
 
     target_file = f'{data_path}/IND32M_MSWX_010_PREC_DAY_1979_2023.npy'
-    dem_file = f'{data_path}/IND32M_GTOP_010_ELEV_DAY_1979_2023_LOGN.npy'
 
     print(f"\nLoading {len(inputs_channels)} atmospheric channels...")
     X_list = []
@@ -750,29 +689,21 @@ def load_data(data_path):
     if y_high.ndim == 3:
         y_high = np.expand_dims(y_high, axis=-1)
 
-    print("\nLoading high-resolution DEM (log-normalized)...")
-    dem_high = np.load(dem_file)  # shape (T, 320, 320) or (320, 320)
-    if dem_high.ndim == 2:
-        dem_high = np.repeat(dem_high[None, ...], y_high.shape[0], axis=0)
-    if dem_high.shape[0] != y_high.shape[0] or dem_high.shape[1] != y_high.shape[1] or dem_high.shape[2] != y_high.shape[2]:
-        raise ValueError(f"DEM shape {dem_high.shape} not compatible with precip {y_high.shape}")
-
     print(f"\n✓ Data loaded:")
     print(f"  X (atmospheric): {X_low.shape}")
     print(f"  y (precip):      {y_high.shape}")
-    print(f"  DEM (fine):      {dem_high.shape} (log-normalized)")
 
-    return X_low, y_high, feature_names, dem_high
+    return X_low, y_high, feature_names
 
 
 def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter=50):
     """
-    Complete RF pipeline with memory-optimized batched prediction
+    Complete RF pipeline with mean pooling and NetCDF export
     """
     os.makedirs(save_dir, exist_ok=True)
 
     print("\n" + "="*80)
-    print("RF PERFECT PROGNOSIS - MEMORY-OPTIMIZED PIPELINE")
+    print("RF PERFECT PROGNOSIS - MEAN POOLING + NETCDF PIPELINE")
     print("="*80)
     print(f"\nConfiguration:")
     print(f"  Data path:          {data_path}")
@@ -782,8 +713,8 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     if tune_model:
         print(f"  Tuning iterations:  {n_iter}")
 
-    # Load data (+ DEM)
-    X_low, y_high, feature_names, dem_high = load_data(data_path)
+    # Load data
+    X_low, y_high, feature_names = load_data(data_path)
 
     total_size = X_low.shape[0]
     val_size = total_size - train_size
@@ -793,11 +724,11 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print(f"  Training:   {train_size} days")
     print(f"  Validation: {val_size} days")
 
-    # Conservative coarsening
-    y_low = conservative_coarsen(y_high, coarse_shape=(32, 32))
+    # MEAN POOLING coarsening (appropriate for intensity variables)
+    y_low = mean_pool_coarsen(y_high, coarse_shape=(32, 32))
 
     # Save coarsened target
-    y_low_path = os.path.join(save_dir, 'precipitation_coarse_32x32_sum.npy')
+    y_low_path = os.path.join(save_dir, 'precipitation_coarse_32x32_mean.npy')
     np.save(y_low_path, y_low)
     print(f"\n✓ Saved coarse precipitation: {y_low_path}")
 
@@ -808,7 +739,6 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     X_val = X_low[train_size:]
     y_val = y_low[train_size:]
     y_val_high = y_high[train_size:]
-    dem_val_high = dem_high[train_size:]
 
     # Initialize model
     rf = RFWithTuning(n_jobs=-1, random_state=42)
@@ -851,11 +781,11 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     y_train_pred = rf.predict_batched(X_train_flat, X_train.shape[:3], batch_size=32768)
     y_val_pred = rf.predict_batched(X_val_flat, X_val.shape[:3], batch_size=32768)
 
-    # Save coarse predictions
+    # Save coarse predictions (numpy)
     print(f"\nSaving coarse predictions...")
     np.save(os.path.join(save_dir, 'train_predictions_32x32.npy'), y_train_pred)
     np.save(os.path.join(save_dir, 'val_predictions_32x32.npy'), y_val_pred)
-    print("✓ Saved")
+    print("✓ Saved numpy arrays")
 
     # Evaluate at coarse resolution
     train_metrics = rf.evaluate(y_train.squeeze(), y_train_pred, 'Training')
@@ -864,19 +794,13 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     # Feature importance
     importance = rf.plot_feature_importance(feature_names, save_dir)
 
-    # Mass-conserving upscaling: geometric baseline
+    # Bilinear upscaling to fine resolution
     val_pred_fine_path = os.path.join(save_dir, 'val_predictions_upscaled_320x320.npy')
-    y_val_pred_fine = rf.mass_conserving_upscale(y_val_pred, (320, 320), val_pred_fine_path)
+    y_val_pred_fine = rf.bilinear_upscale(y_val_pred, (320, 320), val_pred_fine_path)
 
-    # Mass-conserving upscaling: DEM-aware orographic baseline
-    val_pred_fine_dem_path = os.path.join(save_dir, 'val_predictions_upscaled_320x320_demaware.npy')
-    y_val_pred_fine_dem = rf.mass_conserving_upscale_dem(
-        y_val_pred, dem_val_high, (320, 320), alpha=1.0, save_path=val_pred_fine_dem_path
-    )
-
-    # Evaluate at fine resolution: geometric baseline
+    # Evaluate at fine resolution
     print(f"\n{'='*80}")
-    print("FINE RESOLUTION EVALUATION (GEOMETRIC BASELINE)")
+    print("FINE RESOLUTION EVALUATION")
     print('='*80)
 
     y_val_high_flat = y_val_high.flatten()
@@ -886,43 +810,66 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     rmse_fine = np.sqrt(mean_squared_error(y_val_high_flat, y_val_pred_fine_flat))
     mae_fine = mean_absolute_error(y_val_high_flat, y_val_pred_fine_flat)
 
-    print(f"\nFine-resolution metrics (320×320, geometric):")
+    print(f"\nFine-resolution metrics (320×320):")
     print(f"  R²:   {r2_fine:.6f}")
     print(f"  RMSE: {rmse_fine:.4f} mm/day")
     print(f"  MAE:  {mae_fine:.4f} mm/day")
 
     val_metrics_fine = {'r2': r2_fine, 'rmse': rmse_fine, 'mae': mae_fine}
 
-    # Evaluate at fine resolution: DEM-aware baseline
-    print(f"\n{'='*80}")
-    print("FINE RESOLUTION EVALUATION (DEM-AWARE BASELINE)")
-    print('='*80)
-
-    y_val_pred_fine_dem_flat = y_val_pred_fine_dem.flatten()
-    r2_fine_dem = r2_score(y_val_high_flat, y_val_pred_fine_dem_flat)
-    rmse_fine_dem = np.sqrt(mean_squared_error(y_val_high_flat, y_val_pred_fine_dem_flat))
-    mae_fine_dem = mean_absolute_error(y_val_high_flat, y_val_pred_fine_dem_flat)
-
-    print(f"\nFine-resolution metrics (320×320, DEM-aware):")
-    print(f"  R²:   {r2_fine_dem:.6f}")
-    print(f"  RMSE: {rmse_fine_dem:.4f} mm/day")
-    print(f"  MAE:  {mae_fine_dem:.4f} mm/day")
-
-    val_metrics_fine_dem = {'r2': r2_fine_dem, 'rmse': rmse_fine_dem, 'mae': mae_fine_dem}
-
     # Save all metrics
     metrics_path = os.path.join(save_dir, 'metrics.npz')
     np.savez_compressed(metrics_path,
                         train_coarse=train_metrics,
                         val_coarse=val_metrics_coarse,
-                        val_fine_geometric=val_metrics_fine,
-                        val_fine_demaware=val_metrics_fine_dem)
+                        val_fine=val_metrics_fine)
     print(f"\n✓ Saved metrics: {metrics_path}")
 
     # Save fine-resolution target
     val_target_path = os.path.join(save_dir, 'val_target_fine_320x320.npy')
     np.save(val_target_path, y_val_high.squeeze())
     print(f"✓ Saved target: {val_target_path}")
+
+    # =========================================================================
+    # CREATE NETCDF FILES
+    # =========================================================================
+    print(f"\n{'='*80}")
+    print("CREATING NETCDF FILES")
+    print('='*80)
+
+    ref_ds_path = Path("/home/midhunm/NIMBUS/protem/midhun/AI4KLIM/DATASETS/DATASET_IND32M/MASTER/grids/IND32M_GTOP_010_ELEV.nc")
+    
+    # NetCDF for validation predictions
+    try:
+        create_netcdf_file(
+            y_val_pred_fine,
+            ref_ds_path=ref_ds_path,
+            varname="prec",
+            start_date="2010-01-01",
+            end_date="2023-12-31",
+            calendar="standard",
+            save_dir=save_dir,
+            filename="val_predictions_upscaled_320x320.nc",
+            delete_existing_file=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not create NetCDF for validation predictions: {e}")
+
+    # NetCDF for validation target
+    try:
+        create_netcdf_file(
+            y_val_high.squeeze(),
+            ref_ds_path=ref_ds_path,
+            varname="prec",
+            start_date="2010-01-01",
+            end_date="2023-12-31",
+            calendar="standard",
+            save_dir=save_dir,
+            filename="val_target_fine_320x320.nc",
+            delete_existing_file=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not create NetCDF for validation target: {e}")
 
     # Final summary
     print(f"\n{'='*80}")
@@ -932,17 +879,17 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print(f"  best_rf_model.pkl                         - Trained model")
     print(f"  train_predictions_32x32.npy               - Training predictions")
     print(f"  val_predictions_32x32.npy                 - Validation predictions (coarse)")
-    print(f"  val_predictions_upscaled_320x320.npy      - Final predictions (fine, geometric)")
-    print(f"  val_predictions_upscaled_320x320_demaware.npy - Final predictions (fine, DEM-aware)")
-    print(f"  val_target_fine_320x320.npy               - Reference target")
-    print(f"  metrics.npz                               - Performance metrics (both baselines)")
+    print(f"  val_predictions_upscaled_320x320.npy      - Upscaled predictions (fine, numpy)")
+    print(f"  val_predictions_upscaled_320x320.nc       - Upscaled predictions (fine, NetCDF)")
+    print(f"  val_target_fine_320x320.npy               - Ground truth target (numpy)")
+    print(f"  val_target_fine_320x320.nc                - Ground truth target (NetCDF)")
+    print(f"  metrics.npz                               - Performance metrics")
     print(f"  gini_importance.npz & .png                - Feature importance")
     print(f"  best_params.json                          - Best hyperparameters")
     print('='*80)
     print(f"\nPerformance Summary:")
     print(f"  Coarse (32×32):                    R² = {val_metrics_coarse['r2']:.6f}")
-    print(f"  Fine (320×320, geometric):         R² = {val_metrics_fine['r2']:.6f}, RMSE = {rmse_fine:.4f} mm/day")
-    print(f"  Fine (320×320, DEM-aware):         R² = {val_metrics_fine_dem['r2']:.6f}, RMSE = {rmse_fine_dem:.4f} mm/day")
+    print(f"  Fine (320×320):                    R² = {val_metrics_fine['r2']:.6f}, RMSE = {rmse_fine:.4f} mm/day")
     print('='*80)
 
     return rf, y_val_pred_fine, val_metrics_fine
@@ -965,10 +912,10 @@ if __name__ == "__main__":
                 n_iter=n_iter
             )
         except Exception as e:
-            print(f"\n❌ FATAL ERROR: {e}")
+            print(f"\nFATAL ERROR: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
     else:
-        print("Usage: python rf_memory_optimized.py <DATA_PATH> <SAVE_DIR> [TRAIN_SIZE] [TUNE] [N_ITER]")
-        print("Example: python rf_memory_optimized.py /data /output 11323 true 50")
+        print("Usage: python rf_mean_pooling_netcdf.py <DATA_PATH> <SAVE_DIR> [TRAIN_SIZE] [TUNE] [N_ITER]")
+        print("Example: python rf_mean_pooling_netcdf.py /data /output 11323 true 50")

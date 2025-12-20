@@ -7,7 +7,7 @@
 
 # Load Anaconda & activate environment
 source /home/apps/anaconda3/2021.05/etc/profile.d/conda.sh
-conda activate tf217
+conda activate tfex
 
 # Change to job submission directory
 cd "$PBS_O_WORKDIR"
