@@ -16,7 +16,6 @@ import pickle
 import json
 import gc
 
-
 warnings.filterwarnings('ignore')
 
 
@@ -25,7 +24,7 @@ class RFWithTuning:
     Random Forest with Extended Hyperparameter Tuning for Precipitation Downscaling
     Memory-optimized with batched prediction
     """
-    
+
     def __init__(self, n_jobs=-1, random_state=42):
         self.n_jobs = n_jobs if n_jobs > 0 else os.cpu_count()
         self.random_state = random_state
@@ -33,72 +32,72 @@ class RFWithTuning:
         self.best_params = None
         self.tuning_results = None
         self.cv_results_df = None
-        
+
         print(f"Initialized RF with {self.n_jobs} CPU cores")
-    
+
     def prepare_data(self, X_low, y_low, save_dir, prefix='train'):
         """Flatten spatial dimensions for pixel-wise regression"""
         print(f"\n{'='*80}")
         print(f"PREPARING DATA ({prefix.upper()})")
         print('='*80)
-        
+
         t, h, w, c = X_low.shape
-        
+
         # Flatten: (t, h, w, c) → (t*h*w, c)
         X_flat = X_low.reshape(-1, c)
         y_flat = y_low.reshape(-1)
-        
+
         print(f"Original shape: X={X_low.shape}, y={y_low.shape}")
         print(f"Flattened:      X={X_flat.shape}, y={y_flat.shape}")
         print(f"Total samples:  {X_flat.shape[0]:,}")
-        
+
         # Save
         X_path = os.path.join(save_dir, f'{prefix}_X.npz')
         y_path = os.path.join(save_dir, f'{prefix}_y.npz')
-        
+
         np.savez_compressed(X_path, X=X_flat)
         np.savez_compressed(y_path, y=y_flat)
-        
+
         print(f"\n✓ Saved:")
         print(f"  X: {X_path} ({os.path.getsize(X_path)/1e6:.1f} MB)")
         print(f"  y: {y_path} ({os.path.getsize(y_path)/1e6:.1f} MB)")
-        
+
         # Statistics
         print(f"\nData statistics:")
         print(f"  X range: [{X_flat.min():.4f}, {X_flat.max():.4f}]")
         print(f"  y range: [{y_flat.min():.4f}, {y_flat.max():.4f}] mm (total per cell)")
         print(f"  y mean:  {y_flat.mean():.4f} mm (total per cell)")
-        
+
         return X_flat, y_flat
-    
-    def hyperparameter_tuning(self, X_train, y_train, X_val, y_val, 
-                             n_iter=50, cv=3, save_dir=None):
+
+    def hyperparameter_tuning(self, X_train, y_train, X_val, y_val,
+                              n_iter=50, cv=3, save_dir=None):
         """
         Extended hyperparameter tuning with REGULARIZED parameters
         """
         print(f"\n{'='*80}")
         print("REGULARIZED HYPERPARAMETER TUNING")
         print('='*80)
-        
+
         # REGULARIZED parameter grid (prevents overfitting and huge models)
         param_distributions = {
-            'n_estimators': [200, 300, 400, 500],              # Max 500 (not 1000!)
-            'max_depth': [20, 25, 30, 35],                     # Max 35 (not 50!)
-            'min_samples_split': [50, 100, 200, 500],          # Higher regularization
-            'min_samples_leaf': [20, 50, 100, 200],            # Higher regularization
-            'max_features': ['sqrt', 0.2, 0.25, 0.3],          # Fewer features
+            'n_estimators': [200, 300, 400, 500],
+            'max_depth': [20, 25, 30, 35],
+            'min_samples_split': [50, 100, 200, 500],
+            'min_samples_leaf': [20, 50, 100, 200],
+            'max_features': ['sqrt', 0.2, 0.25, 0.3],
             'bootstrap': [True],
-            'max_samples': [0.6, 0.7, 0.8]                     # Lower sampling
+            'max_samples': [0.6, 0.7, 0.8]
         }
-        
+
         print(f"\nRegularized parameter search space (anti-overfitting):")
         for param, values in param_distributions.items():
             print(f"  {param:20s}: {values}")
-        
+
         total_combinations = 1
         for values in param_distributions.values():
             total_combinations *= len(values)
-        
+
         print(f"\nSearch strategy:")
         print(f"  Total combinations:   {total_combinations:,}")
         print(f"  Sampling:             {n_iter} iterations")
@@ -106,7 +105,7 @@ class RFWithTuning:
         print(f"  Cross-validation:     {cv}-fold")
         print(f"  Scoring:              R²")
         print(f"  Total model fits:     {n_iter * cv:,}")
-        
+
         # Subsample training data for faster tuning
         max_tuning_samples = 100000
         if X_train.shape[0] > max_tuning_samples:
@@ -118,9 +117,9 @@ class RFWithTuning:
         else:
             X_tune = X_train
             y_tune = y_train
-        
+
         print(f"\nTuning on {X_tune.shape[0]:,} samples...")
-        
+
         # Base estimator
         rf_base = RandomForestRegressor(
             n_jobs=self.n_jobs,
@@ -128,7 +127,7 @@ class RFWithTuning:
             verbose=0,
             warm_start=False
         )
-        
+
         # Randomized search
         search = RandomizedSearchCV(
             rf_base,
@@ -142,76 +141,76 @@ class RFWithTuning:
             return_train_score=True,
             refit=True
         )
-        
+
         print("\nStarting hyperparameter search...")
         print(f"Estimated time: {n_iter * cv * 2 / 60:.1f} - {n_iter * cv * 5 / 60:.1f} minutes")
         start_time = time.time()
-        
+
         try:
             search.fit(X_tune, y_tune)
         except Exception as e:
             print(f"\n❌ Error during hyperparameter tuning: {e}")
             raise
-        
+
         elapsed = time.time() - start_time
         print(f"\n✓ Tuning completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
-        
+
         # Store results
         self.best_params = search.best_params_
         self.tuning_results = search.cv_results_
-        
+
         # Create detailed results DataFrame
         self.cv_results_df = pd.DataFrame(self.tuning_results)
-        
+
         # Print best parameters
         print(f"\n{'='*80}")
         print("BEST PARAMETERS FOUND")
         print('='*80)
         for param, value in self.best_params.items():
             print(f"  {param:20s}: {value}")
-        
+
         print(f"\nCross-validation performance:")
         print(f"  Best CV R²:          {search.best_score_:.6f}")
         print(f"  CV R² std:           {self.tuning_results['std_test_score'][search.best_index_]:.6f}")
         print(f"  Best CV rank:        {search.best_index_ + 1}/{n_iter}")
-        
+
         # Get top 10 configurations
         print(f"\n{'='*80}")
         print("TOP 10 CONFIGURATIONS")
         print('='*80)
-        
+
         top_10_idx = np.argsort(self.tuning_results['mean_test_score'])[-10:][::-1]
-        
+
         print(f"\n{'Rank':<6} {'R²':<10} {'±std':<10} {'Trees':<8} {'Depth':<8} {'Features':<12}")
         print("-" * 80)
         for rank, idx in enumerate(top_10_idx, 1):
             r2_mean = self.tuning_results['mean_test_score'][idx]
             r2_std = self.tuning_results['std_test_score'][idx]
             params = self.tuning_results['params'][idx]
-            
+
             print(f"{rank:<6} {r2_mean:<10.6f} {r2_std:<10.6f} "
                   f"{params['n_estimators']:<8} {str(params['max_depth']):<8} "
                   f"{str(params['max_features']):<12}")
-        
+
         # Evaluate best model on validation set
         print(f"\n{'='*80}")
         print("VALIDATION PERFORMANCE")
         print('='*80)
-        
+
         y_val_pred = search.best_estimator_.predict(X_val)
-        
+
         val_r2 = r2_score(y_val, y_val_pred)
         val_rmse = np.sqrt(mean_squared_error(y_val, y_val_pred))
         val_mae = mean_absolute_error(y_val, y_val_pred)
-        
+
         print(f"  Validation R²:       {val_r2:.6f}")
         print(f"  Validation RMSE:     {val_rmse:.4f} mm")
         print(f"  Validation MAE:      {val_mae:.4f} mm")
-        
+
         # Check for overfitting
         train_r2 = self.tuning_results['mean_train_score'][search.best_index_]
         overfit_gap = train_r2 - search.best_score_
-        
+
         print(f"\n  Train R² (CV):       {train_r2:.6f}")
         print(f"  Test R² (CV):        {search.best_score_:.6f}")
         print(f"  Overfit gap:         {overfit_gap:.6f}")
@@ -220,22 +219,22 @@ class RFWithTuning:
             print(f"  → Model may not generalize well to new data")
         else:
             print(f"  ✓ No significant overfitting")
-        
+
         # Store best estimator
         self.best_model = search.best_estimator_
-        
+
         # Save tuning results if directory provided
         if save_dir:
             self.save_tuning_results(save_dir, elapsed)
-        
+
         return self.best_params, search.best_score_
-    
+
     def save_tuning_results(self, save_dir, elapsed_time):
         """Save comprehensive tuning results"""
         print(f"\n{'='*80}")
         print("SAVING TUNING RESULTS")
         print('='*80)
-        
+
         # 1. Save best parameters (JSON)
         best_params_path = os.path.join(save_dir, 'best_params.json')
         with open(best_params_path, 'w') as f:
@@ -247,117 +246,117 @@ class RFWithTuning:
                     params_serializable[k] = v
             json.dump(params_serializable, f, indent=2)
         print(f"✓ Best parameters (JSON):     {best_params_path}")
-        
+
         # 2. Save all CV results (CSV)
         cv_results_path = os.path.join(save_dir, 'cv_results_all.csv')
         self.cv_results_df.to_csv(cv_results_path, index=False)
         print(f"✓ All CV results (CSV):       {cv_results_path}")
-        
+
         # 3. Save top 50 configurations (CSV)
         top_50_path = os.path.join(save_dir, 'cv_results_top50.csv')
         top_50_idx = np.argsort(self.cv_results_df['mean_test_score'])[-50:][::-1]
         top_50_df = self.cv_results_df.iloc[top_50_idx]
         top_50_df.to_csv(top_50_path, index=False)
         print(f"✓ Top 50 configs (CSV):       {top_50_path}")
-        
+
         # 4. Save summary statistics (TXT)
         summary_path = os.path.join(save_dir, 'tuning_summary.txt')
         with open(summary_path, 'w') as f:
             f.write("="*80 + "\n")
             f.write("HYPERPARAMETER TUNING SUMMARY\n")
             f.write("="*80 + "\n\n")
-            
+
             f.write(f"Tuning time: {elapsed_time:.1f}s ({elapsed_time/60:.1f} min)\n")
             f.write(f"Total iterations: {len(self.cv_results_df)}\n\n")
-            
+
             f.write("Best parameters:\n")
             for param, value in self.best_params.items():
                 f.write(f"  {param:20s}: {value}\n")
-            
+
             f.write(f"\nBest CV R²: {self.cv_results_df['mean_test_score'].max():.6f}\n")
-        
+
         print(f"✓ Tuning summary (TXT):       {summary_path}")
-        
+
         # 5. Save raw CV results (NPZ)
         cv_results_npz_path = os.path.join(save_dir, 'cv_results_raw.npz')
         np.savez_compressed(cv_results_npz_path, **self.tuning_results)
         print(f"✓ Raw CV results (NPZ):       {cv_results_npz_path}")
-        
+
         # 6. Create visualization plots
         try:
             self.plot_tuning_results(save_dir)
         except Exception as e:
             print(f"⚠ Warning: Could not create plots: {e}")
-    
+
     def plot_tuning_results(self, save_dir):
         """Create visualization of tuning results"""
         print(f"\nGenerating tuning visualizations...")
-        
+
         # Performance over iterations
         fig, ax = plt.subplots(figsize=(12, 6))
-        
+
         iterations = np.arange(len(self.cv_results_df))
         mean_scores = self.cv_results_df['mean_test_score']
         std_scores = self.cv_results_df['std_test_score']
-        
-        ax.plot(iterations, mean_scores, 'o-', color='steelblue', 
-               markersize=4, linewidth=1, alpha=0.6, label='Test R²')
-        ax.fill_between(iterations, 
-                        mean_scores - std_scores, 
+
+        ax.plot(iterations, mean_scores, 'o-', color='steelblue',
+                markersize=4, linewidth=1, alpha=0.6, label='Test R²')
+        ax.fill_between(iterations,
+                        mean_scores - std_scores,
                         mean_scores + std_scores,
                         alpha=0.2, color='steelblue')
-        
+
         best_idx = mean_scores.idxmax()
-        ax.plot(best_idx, mean_scores[best_idx], 'r*', 
-               markersize=20, label=f'Best (R²={mean_scores[best_idx]:.4f})')
-        
+        ax.plot(best_idx, mean_scores[best_idx], 'r*',
+                markersize=20, label=f'Best (R²={mean_scores[best_idx]:.4f})')
+
         ax.set_xlabel('Iteration', fontweight='bold', fontsize=12)
         ax.set_ylabel('Cross-Validation R²', fontweight='bold', fontsize=12)
         ax.set_title('Hyperparameter Search Progress', fontweight='bold', fontsize=14)
         ax.legend(loc='best')
         ax.grid(alpha=0.3, linestyle='--')
-        
+
         plt.tight_layout()
         plot_path = os.path.join(save_dir, 'search_progress.png')
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         print(f"✓ Search progress plot:       {plot_path}")
         plt.close()
-    
+
     def train_best_model(self, X_train, y_train, best_params):
         """Train final model with best parameters"""
         print(f"\n{'='*80}")
         print("TRAINING FINAL MODEL WITH BEST PARAMETERS")
         print('='*80)
-        
+
         print(f"\nTraining on full dataset: {X_train.shape[0]:,} samples")
         print(f"\nBest parameters:")
         for param, value in best_params.items():
             print(f"  {param:20s}: {value}")
-        
+
         start_time = time.time()
-        
+
         self.best_model = RandomForestRegressor(
             **best_params,
             n_jobs=self.n_jobs,
             random_state=self.random_state,
             verbose=2
         )
-        
+
         try:
             self.best_model.fit(X_train, y_train)
         except Exception as e:
             print(f"\n❌ Error during model training: {e}")
             raise
-        
+
         elapsed = time.time() - start_time
         print(f"\n✓ Training completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
-        
+
         # Training score
         train_score = self.best_model.score(X_train, y_train)
         print(f"  Training R²: {train_score:.6f}")
-        
+
         return self.best_model
-    
+
     def predict_batched(self, X_test, original_shape, batch_size=32768):
         """
         BATCHED PREDICTION (Memory-efficient)
@@ -366,91 +365,91 @@ class RFWithTuning:
         print(f"\n{'='*80}")
         print("BATCHED PREDICTION AT COARSE RESOLUTION")
         print('='*80)
-        
+
         n_samples = X_test.shape[0]
         t, h, w = original_shape
-        
+
         print(f"Total samples:    {n_samples:,}")
         print(f"Batch size:       {batch_size:,}")
         print(f"Number of batches: {(n_samples + batch_size - 1) // batch_size}")
-        
+
         # Pre-allocate output array
         y_pred_flat = np.zeros(n_samples, dtype=np.float32)
-        
+
         start_time = time.time()
-        
+
         # Predict in batches
         n_batches = (n_samples + batch_size - 1) // batch_size
-        
+
         for batch_idx in tqdm(range(n_batches), desc="Batch prediction"):
             start_idx = batch_idx * batch_size
             end_idx = min((batch_idx + 1) * batch_size, n_samples)
-            
+
             # Predict batch
             X_batch = X_test[start_idx:end_idx]
             y_batch_pred = self.best_model.predict(X_batch)
             y_pred_flat[start_idx:end_idx] = y_batch_pred
-            
+
             # Free memory
             del X_batch, y_batch_pred
-            
+
             # Periodic garbage collection
             if batch_idx % 10 == 0:
                 gc.collect()
-        
+
         elapsed = time.time() - start_time
         print(f"\n✓ Prediction completed in {elapsed:.1f}s")
-        
+
         # Reshape to spatial
         y_pred = y_pred_flat.reshape(t, h, w)
         y_pred = np.maximum(y_pred, 0)  # Non-negative
-        
+
         print(f"\nPrediction statistics:")
         print(f"  Shape: {y_pred.shape}")
         print(f"  Range: [{y_pred.min():.4f}, {y_pred.max():.4f}] mm (total per cell)")
         print(f"  Mean:  {y_pred.mean():.4f} mm (total per cell)")
-        
+
         return y_pred
-    
+
     def evaluate(self, y_true, y_pred, prefix='Validation'):
         """Calculate evaluation metrics"""
         print(f"\n{'='*80}")
         print(f"{prefix.upper()} METRICS (COARSE RESOLUTION)")
         print('='*80)
-        
+
         y_true_flat = y_true.flatten()
         y_pred_flat = y_pred.flatten()
-        
+
         r2 = r2_score(y_true_flat, y_pred_flat)
         rmse = np.sqrt(mean_squared_error(y_true_flat, y_pred_flat))
         mae = mean_absolute_error(y_true_flat, y_pred_flat)
-        
+
         print(f"\nOverall metrics:")
         print(f"  R²:   {r2:.6f}")
         print(f"  RMSE: {rmse:.4f} mm")
         print(f"  MAE:  {mae:.4f} mm")
-        
+
         return {'r2': r2, 'rmse': rmse, 'mae': mae}
-    
+
     def plot_feature_importance(self, feature_names, save_dir):
         """Plot Gini importance"""
         print(f"\n{'='*80}")
         print("FEATURE IMPORTANCE (GINI)")
         print('='*80)
-        
+
         importance = self.best_model.feature_importances_
-        
+
         # Sort by importance
         sorted_idx = np.argsort(importance)[::-1]
         sorted_importance = importance[sorted_idx]
         sorted_features = [feature_names[i] for i in sorted_idx]
-        
+
         # Print top 15
         print("\nTop 15 most important features:")
         print("-" * 60)
         for rank, (feat, imp) in enumerate(zip(sorted_features[:15], sorted_importance[:15]), 1):
             print(f"  {rank:2d}. {feat:15s}: {imp:.6f}")
-        
+
         # Save to file
         importance_path = os.path.join(save_dir, 'gini_importance.npz')
         np.savez_compressed(
@@ -459,11 +458,11 @@ class RFWithTuning:
             feature_names=np.array(feature_names)
         )
         print(f"\n✓ Saved importance to: {importance_path}")
-        
+
         # Create plot
         try:
             fig, ax = plt.subplots(figsize=(10, 8))
-            
+
             y_pos = np.arange(len(sorted_features))
             ax.barh(y_pos, sorted_importance, color='steelblue', edgecolor='black', linewidth=0.5)
             ax.set_yticks(y_pos)
@@ -472,33 +471,33 @@ class RFWithTuning:
             ax.set_title('Feature Importance - Random Forest', fontsize=14, fontweight='bold')
             ax.grid(axis='x', alpha=0.3, linestyle='--')
             ax.invert_yaxis()
-            
+
             plt.tight_layout()
-            
+
             plot_path = os.path.join(save_dir, 'gini_importance.png')
             plt.savefig(plot_path, dpi=300, bbox_inches='tight')
             print(f"✓ Saved plot to: {plot_path}")
             plt.close()
         except Exception as e:
             print(f"⚠ Warning: Could not create plot: {e}")
-        
+
         return importance
-    
+
     def mass_conserving_upscale(self, y_coarse, target_shape=(320, 320), save_path=None):
-        """Mass-conserving bilinear upscaling"""
+        """Mass-conserving bilinear upscaling (geometric baseline)"""
         print(f"\n{'='*80}")
         print("MASS-CONSERVING UPSCALING TO FINE RESOLUTION")
         print('='*80)
-        
+
         t, h_low, w_low = y_coarse.shape
         h_high, w_high = target_shape
-        
+
         factor_h = h_high // h_low
         factor_w = w_high // w_low
-        
+
         print(f"Upscaling from {h_low}×{w_low} to {h_high}×{w_high}")
         print(f"Upscaling factor: {factor_h}×{factor_w}")
-        
+
         # Step 1: Bilinear interpolation
         print(f"\nStep 1: Bilinear interpolation...")
         start_time = time.time()
@@ -506,62 +505,155 @@ class RFWithTuning:
         y_fine_interp = zoom(y_coarse, zoom_factors, order=1, mode='nearest')
         elapsed = time.time() - start_time
         print(f"✓ Completed in {elapsed:.1f}s")
-        
+
         print(f"\nBefore mass correction:")
         print(f"  Coarse total: {y_coarse.sum():,.2f} mm")
         print(f"  Fine total:   {y_fine_interp.sum():,.2f} mm")
         print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_interp.sum())/y_coarse.sum()*100:.2f}%")
-        
+
         # Step 2: Mass conservation correction
         print(f"\nStep 2: Mass conservation correction...")
         y_fine_corrected = np.zeros_like(y_fine_interp)
-        
+
         start_time = time.time()
         for ti in tqdm(range(t), desc="Mass correction"):
             for i in range(h_low):
                 for j in range(w_low):
                     target_sum = y_coarse[ti, i, j]
-                    fine_box = y_fine_interp[ti, i*factor_h:(i+1)*factor_h, j*factor_w:(j+1)*factor_w]
+                    fine_box = y_fine_interp[ti,
+                                             i*factor_h:(i+1)*factor_h,
+                                             j*factor_w:(j+1)*factor_w]
                     current_sum = fine_box.sum()
-                    
+
                     if current_sum > 0:
-                        y_fine_corrected[ti, i*factor_h:(i+1)*factor_h, j*factor_w:(j+1)*factor_w] = \
+                        y_fine_corrected[ti,
+                                         i*factor_h:(i+1)*factor_h,
+                                         j*factor_w:(j+1)*factor_w] = \
                             fine_box * (target_sum / current_sum)
                     else:
-                        y_fine_corrected[ti, i*factor_h:(i+1)*factor_h, j*factor_w:(j+1)*factor_w] = \
+                        y_fine_corrected[ti,
+                                         i*factor_h:(i+1)*factor_h,
+                                         j*factor_w:(j+1)*factor_w] = \
                             target_sum / (factor_h * factor_w)
-        
+
         elapsed = time.time() - start_time
         print(f"✓ Correction completed in {elapsed:.1f}s")
-        
+
         print(f"\nAfter mass correction:")
         print(f"  Fine total:   {y_fine_corrected.sum():,.2f} mm")
         print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_corrected.sum())/y_coarse.sum()*100:.8f}%")
-        
+
         # Convert from total mm to mm/day
         y_fine_mmday = y_fine_corrected / (factor_h * factor_w)
-        
+
         print(f"\nFinal fine-resolution predictions:")
         print(f"  Shape:  {y_fine_mmday.shape}")
         print(f"  Range:  [{y_fine_mmday.min():.4f}, {y_fine_mmday.max():.4f}] mm/day")
         print(f"  Mean:   {y_fine_mmday.mean():.4f} mm/day")
-        
+
         if save_path:
             np.save(save_path, y_fine_mmday)
             print(f"✓ Saved to: {save_path}")
             print(f"  File size: {os.path.getsize(save_path) / 1e9:.2f} GB")
-        
+
         return y_fine_mmday
-    
+
+    def mass_conserving_upscale_dem(self, y_coarse, dem_high, target_shape=(320, 320),
+                                    alpha=1.0, eps=1e-6, save_path=None):
+        """
+        DEM-aware mass-conserving bilinear upscaling (orographic baseline).
+        Uses bilinear interpolation as a shape prior, then redistributes each coarse total
+        across its fine 10×10 subgrid using weights (interp + eps) * exp(alpha * DEM),
+        preserving the coarse 32×32 totals.
+        """
+        print(f"\n{'='*80}")
+        print("DEM-AWARE MASS-CONSERVING UPSCALING TO FINE RESOLUTION")
+        print('='*80)
+
+        t, h_low, w_low = y_coarse.shape
+        h_high, w_high = target_shape
+        factor_h = h_high // h_low
+        factor_w = w_high // w_low
+
+        if dem_high.shape != (t, h_high, w_high):
+            raise ValueError(f"dem_high shape {dem_high.shape} not compatible with "
+                             f"y_coarse {y_coarse.shape} and target {target_shape}")
+
+        print(f"Upscaling from {h_low}×{w_low} to {h_high}×{w_high}")
+        print(f"Upscaling factor: {factor_h}×{factor_w}")
+        print(f"DEM weighting alpha = {alpha}")
+
+        # Step 1: Bilinear interpolation
+        print(f"\nStep 1: Bilinear interpolation...")
+        start_time = time.time()
+        zoom_factors = (1, h_high/h_low, w_high/w_low)
+        y_fine_interp = zoom(y_coarse, zoom_factors, order=1, mode='nearest')
+        elapsed = time.time() - start_time
+        print(f"✓ Completed in {elapsed:.1f}s")
+
+        print(f"\nBefore DEM-based mass correction:")
+        print(f"  Coarse total: {y_coarse.sum():,.2f} mm")
+        print(f"  Fine total:   {y_fine_interp.sum():,.2f} mm")
+        print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_interp.sum())/y_coarse.sum()*100:.2f}%")
+
+        # Step 2: DEM-aware mass conservation
+        print(f"\nStep 2: DEM-aware mass conservation correction...")
+        y_fine_corrected = np.zeros_like(y_fine_interp, dtype=np.float32)
+
+        start_time = time.time()
+        for ti in tqdm(range(t), desc="DEM mass correction"):
+            for i in range(h_low):
+                i0 = i * factor_h
+                i1 = (i + 1) * factor_h
+                for j in range(w_low):
+                    j0 = j * factor_w
+                    j1 = (j + 1) * factor_w
+
+                    target_sum = y_coarse[ti, i, j]
+                    fine_box = y_fine_interp[ti, i0:i1, j0:j1]
+                    dem_box = dem_high[ti, i0:i1, j0:j1]
+
+                    w = (fine_box + eps) * np.exp(alpha * dem_box)
+                    w_sum = w.sum()
+
+                    if w_sum > 0 and target_sum > 0:
+                        y_fine_corrected[ti, i0:i1, j0:j1] = target_sum * w / w_sum
+                    elif target_sum > 0:
+                        y_fine_corrected[ti, i0:i1, j0:j1] = target_sum / (factor_h * factor_w)
+                    else:
+                        y_fine_corrected[ti, i0:i1, j0:j1] = 0.0
+
+        elapsed = time.time() - start_time
+        print(f"✓ DEM-aware correction completed in {elapsed:.1f}s")
+
+        print(f"\nAfter DEM-based mass correction:")
+        print(f"  Fine total:   {y_fine_corrected.sum():,.2f} mm")
+        print(f"  Mass error:   {abs(y_coarse.sum() - y_fine_corrected.sum())/y_coarse.sum()*100:.8f}%")
+
+        # Convert from total mm to mm/day
+        y_fine_mmday = y_fine_corrected / (factor_h * factor_w)
+
+        print(f"\nFinal fine-resolution DEM-aware predictions:")
+        print(f"  Shape:  {y_fine_mmday.shape}")
+        print(f"  Range:  [{y_fine_mmday.min():.4f}, {y_fine_mmday.max():.4f}] mm/day")
+        print(f"  Mean:   {y_fine_mmday.mean():.4f} mm/day")
+
+        if save_path:
+            np.save(save_path, y_fine_mmday)
+            print(f"✓ Saved to: {save_path}")
+            print(f"  File size: {os.path.getsize(save_path) / 1e9:.2f} GB")
+
+        return y_fine_mmday
+
     def save_model(self, save_path):
         """Save trained model"""
         print(f"\n✓ Saving model to: {save_path}")
         with open(save_path, 'wb') as f:
             pickle.dump(self.best_model, f, protocol=4)
-        
+
         model_size_gb = os.path.getsize(save_path) / 1e9
         print(f"  Model size: {model_size_gb:.2f} GB")
-        
+
         if model_size_gb > 20:
             print(f"  ⚠ WARNING: Model is very large ({model_size_gb:.1f} GB)")
             print(f"  → Consider using more regularization (lower max_depth, higher min_samples_leaf)")
@@ -572,43 +664,43 @@ def conservative_coarsen(y_high, coarse_shape=(32, 32)):
     print(f"\n{'='*80}")
     print("CONSERVATIVE COARSENING (SUM)")
     print('='*80)
-    
+
     t, h_high, w_high, c = y_high.shape
     h_coarse, w_coarse = coarse_shape
-    
+
     factor_h = h_high // h_coarse
     factor_w = w_high // w_coarse
-    
+
     print(f"From {h_high}×{w_high} to {h_coarse}×{w_coarse}")
     print(f"Box size: {factor_h}×{factor_w}")
-    
+
     start_time = time.time()
-    
+
     y_reshaped = y_high[:, :, :, 0].reshape(t, h_coarse, factor_h, w_coarse, factor_w)
     y_coarse_3d = y_reshaped.sum(axis=(2, 4))
     y_coarse = y_coarse_3d.reshape(t, h_coarse, w_coarse, 1).astype(np.float32)
-    
+
     elapsed = time.time() - start_time
     print(f"\n✓ Coarsening completed in {elapsed:.1f}s")
-    
+
     fine_total = y_high.sum()
     coarse_total = y_coarse.sum()
-    
+
     print(f"\n✓ Mass conservation:")
     print(f"  Fine total:   {fine_total:,.2f} mm")
     print(f"  Coarse total: {coarse_total:,.2f} mm")
     print(f"  Error:        {abs(fine_total - coarse_total) / fine_total * 100:.8f}%")
-    
+
     return y_coarse
 
 
 def load_data(data_path):
-    """Load atmospheric and precipitation data"""
+    """Load atmospheric and precipitation data and high-res DEM"""
     print(f"\n{'='*80}")
     print("LOADING DATA")
     print('='*80)
     print(f"Data path: {data_path}")
-    
+
     inputs_channels = {
         'z850': f'{data_path}/IND32M_ERA5_100_Z850_DAY_1979_2023_RBIL.npy',
         'z700': f'{data_path}/IND32M_ERA5_100_Z700_DAY_1979_2023_RBIL.npy',
@@ -638,9 +730,10 @@ def load_data(data_path):
         't2m': f'{data_path}/IND32M_ERA5_100_T2M_DAY_1979_2023_RBIL.npy',
         'cape': f'{data_path}/IND32M_ERA5_100_CAPE_DAY_1979_2023_RBIL.npy',
     }
-    
+
     target_file = f'{data_path}/IND32M_MSWX_010_PREC_DAY_1979_2023.npy'
-    
+    dem_file = f'{data_path}/IND32M_GTOP_010_ELEV_DAY_1979_2023_LOGN.npy'
+
     print(f"\nLoading {len(inputs_channels)} atmospheric channels...")
     X_list = []
     feature_names = []
@@ -648,20 +741,28 @@ def load_data(data_path):
         print(f"  [{i+1:2d}/{len(inputs_channels)}] {var_name:6s}...", end=' ')
         X_list.append(np.load(file_path))
         feature_names.append(var_name)
-        print(f"✓")
-    
+        print("✓")
+
     X_low = np.stack(X_list, axis=-1)
-    
+
     print(f"\nLoading precipitation...")
     y_high = np.load(target_file)
     if y_high.ndim == 3:
         y_high = np.expand_dims(y_high, axis=-1)
-    
+
+    print("\nLoading high-resolution DEM (log-normalized)...")
+    dem_high = np.load(dem_file)  # shape (T, 320, 320) or (320, 320)
+    if dem_high.ndim == 2:
+        dem_high = np.repeat(dem_high[None, ...], y_high.shape[0], axis=0)
+    if dem_high.shape[0] != y_high.shape[0] or dem_high.shape[1] != y_high.shape[1] or dem_high.shape[2] != y_high.shape[2]:
+        raise ValueError(f"DEM shape {dem_high.shape} not compatible with precip {y_high.shape}")
+
     print(f"\n✓ Data loaded:")
     print(f"  X (atmospheric): {X_low.shape}")
     print(f"  y (precip):      {y_high.shape}")
-    
-    return X_low, y_high, feature_names
+    print(f"  DEM (fine):      {dem_high.shape} (log-normalized)")
+
+    return X_low, y_high, feature_names, dem_high
 
 
 def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter=50):
@@ -669,7 +770,7 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     Complete RF pipeline with memory-optimized batched prediction
     """
     os.makedirs(save_dir, exist_ok=True)
-    
+
     print("\n" + "="*80)
     print("RF PERFECT PROGNOSIS - MEMORY-OPTIMIZED PIPELINE")
     print("="*80)
@@ -680,47 +781,48 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print(f"  Tuning enabled:     {tune_model}")
     if tune_model:
         print(f"  Tuning iterations:  {n_iter}")
-    
-    # Load data
-    X_low, y_high, feature_names = load_data(data_path)
-    
+
+    # Load data (+ DEM)
+    X_low, y_high, feature_names, dem_high = load_data(data_path)
+
     total_size = X_low.shape[0]
     val_size = total_size - train_size
-    
+
     print(f"\nData split:")
     print(f"  Total:      {total_size} days")
     print(f"  Training:   {train_size} days")
     print(f"  Validation: {val_size} days")
-    
+
     # Conservative coarsening
     y_low = conservative_coarsen(y_high, coarse_shape=(32, 32))
-    
+
     # Save coarsened target
     y_low_path = os.path.join(save_dir, 'precipitation_coarse_32x32_sum.npy')
     np.save(y_low_path, y_low)
     print(f"\n✓ Saved coarse precipitation: {y_low_path}")
-    
+
     # Split data
     X_train = X_low[:train_size]
     y_train = y_low[:train_size]
-    
+
     X_val = X_low[train_size:]
     y_val = y_low[train_size:]
     y_val_high = y_high[train_size:]
-    
+    dem_val_high = dem_high[train_size:]
+
     # Initialize model
     rf = RFWithTuning(n_jobs=-1, random_state=42)
-    
+
     # Prepare data
     X_train_flat, y_train_flat = rf.prepare_data(X_train, y_train, save_dir, 'train')
     X_val_flat, y_val_flat = rf.prepare_data(X_val, y_val, save_dir, 'val')
-    
+
     # Hyperparameter tuning
     if tune_model:
         best_params, best_cv_score = rf.hyperparameter_tuning(
-            X_train_flat, y_train_flat, 
+            X_train_flat, y_train_flat,
             X_val_flat, y_val_flat,
-            n_iter=n_iter, cv=3, 
+            n_iter=n_iter, cv=3,
             save_dir=save_dir
         )
         rf.train_best_model(X_train_flat, y_train_flat, best_params)
@@ -736,68 +838,92 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
             'max_samples': 0.8
         }
         rf.train_best_model(X_train_flat, y_train_flat, default_params)
-    
+
     # Save model
     model_path = os.path.join(save_dir, 'best_rf_model.pkl')
     rf.save_model(model_path)
-    
+
     # BATCHED PREDICTIONS (memory-safe)
     print(f"\n{'='*80}")
     print("GENERATING PREDICTIONS (BATCHED)")
     print('='*80)
-    
+
     y_train_pred = rf.predict_batched(X_train_flat, X_train.shape[:3], batch_size=32768)
     y_val_pred = rf.predict_batched(X_val_flat, X_val.shape[:3], batch_size=32768)
-    
+
     # Save coarse predictions
     print(f"\nSaving coarse predictions...")
     np.save(os.path.join(save_dir, 'train_predictions_32x32.npy'), y_train_pred)
     np.save(os.path.join(save_dir, 'val_predictions_32x32.npy'), y_val_pred)
-    print(f"✓ Saved")
-    
+    print("✓ Saved")
+
     # Evaluate at coarse resolution
     train_metrics = rf.evaluate(y_train.squeeze(), y_train_pred, 'Training')
     val_metrics_coarse = rf.evaluate(y_val.squeeze(), y_val_pred, 'Validation')
-    
+
     # Feature importance
     importance = rf.plot_feature_importance(feature_names, save_dir)
-    
-    # Mass-conserving upscaling
+
+    # Mass-conserving upscaling: geometric baseline
     val_pred_fine_path = os.path.join(save_dir, 'val_predictions_upscaled_320x320.npy')
     y_val_pred_fine = rf.mass_conserving_upscale(y_val_pred, (320, 320), val_pred_fine_path)
-    
-    # Evaluate at fine resolution
+
+    # Mass-conserving upscaling: DEM-aware orographic baseline
+    val_pred_fine_dem_path = os.path.join(save_dir, 'val_predictions_upscaled_320x320_demaware.npy')
+    y_val_pred_fine_dem = rf.mass_conserving_upscale_dem(
+        y_val_pred, dem_val_high, (320, 320), alpha=1.0, save_path=val_pred_fine_dem_path
+    )
+
+    # Evaluate at fine resolution: geometric baseline
     print(f"\n{'='*80}")
-    print("FINE RESOLUTION EVALUATION")
+    print("FINE RESOLUTION EVALUATION (GEOMETRIC BASELINE)")
     print('='*80)
-    
+
     y_val_high_flat = y_val_high.flatten()
     y_val_pred_fine_flat = y_val_pred_fine.flatten()
-    
+
     r2_fine = r2_score(y_val_high_flat, y_val_pred_fine_flat)
     rmse_fine = np.sqrt(mean_squared_error(y_val_high_flat, y_val_pred_fine_flat))
     mae_fine = mean_absolute_error(y_val_high_flat, y_val_pred_fine_flat)
-    
-    print(f"\nFine-resolution metrics (320×320):")
+
+    print(f"\nFine-resolution metrics (320×320, geometric):")
     print(f"  R²:   {r2_fine:.6f}")
     print(f"  RMSE: {rmse_fine:.4f} mm/day")
     print(f"  MAE:  {mae_fine:.4f} mm/day")
-    
+
     val_metrics_fine = {'r2': r2_fine, 'rmse': rmse_fine, 'mae': mae_fine}
-    
+
+    # Evaluate at fine resolution: DEM-aware baseline
+    print(f"\n{'='*80}")
+    print("FINE RESOLUTION EVALUATION (DEM-AWARE BASELINE)")
+    print('='*80)
+
+    y_val_pred_fine_dem_flat = y_val_pred_fine_dem.flatten()
+    r2_fine_dem = r2_score(y_val_high_flat, y_val_pred_fine_dem_flat)
+    rmse_fine_dem = np.sqrt(mean_squared_error(y_val_high_flat, y_val_pred_fine_dem_flat))
+    mae_fine_dem = mean_absolute_error(y_val_high_flat, y_val_pred_fine_dem_flat)
+
+    print(f"\nFine-resolution metrics (320×320, DEM-aware):")
+    print(f"  R²:   {r2_fine_dem:.6f}")
+    print(f"  RMSE: {rmse_fine_dem:.4f} mm/day")
+    print(f"  MAE:  {mae_fine_dem:.4f} mm/day")
+
+    val_metrics_fine_dem = {'r2': r2_fine_dem, 'rmse': rmse_fine_dem, 'mae': mae_fine_dem}
+
     # Save all metrics
     metrics_path = os.path.join(save_dir, 'metrics.npz')
-    np.savez_compressed(metrics_path, 
-                       train_coarse=train_metrics,
-                       val_coarse=val_metrics_coarse,
-                       val_fine=val_metrics_fine)
+    np.savez_compressed(metrics_path,
+                        train_coarse=train_metrics,
+                        val_coarse=val_metrics_coarse,
+                        val_fine_geometric=val_metrics_fine,
+                        val_fine_demaware=val_metrics_fine_dem)
     print(f"\n✓ Saved metrics: {metrics_path}")
-    
+
     # Save fine-resolution target
     val_target_path = os.path.join(save_dir, 'val_target_fine_320x320.npy')
     np.save(val_target_path, y_val_high.squeeze())
     print(f"✓ Saved target: {val_target_path}")
-    
+
     # Final summary
     print(f"\n{'='*80}")
     print("✓ PIPELINE COMPLETED SUCCESSFULLY!")
@@ -806,28 +932,30 @@ def main_pipeline(data_path, save_dir, train_size=11323, tune_model=True, n_iter
     print(f"  best_rf_model.pkl                         - Trained model")
     print(f"  train_predictions_32x32.npy               - Training predictions")
     print(f"  val_predictions_32x32.npy                 - Validation predictions (coarse)")
-    print(f"  val_predictions_upscaled_320x320.npy      - Final predictions (fine)")
+    print(f"  val_predictions_upscaled_320x320.npy      - Final predictions (fine, geometric)")
+    print(f"  val_predictions_upscaled_320x320_demaware.npy - Final predictions (fine, DEM-aware)")
     print(f"  val_target_fine_320x320.npy               - Reference target")
-    print(f"  metrics.npz                               - Performance metrics")
+    print(f"  metrics.npz                               - Performance metrics (both baselines)")
     print(f"  gini_importance.npz & .png                - Feature importance")
     print(f"  best_params.json                          - Best hyperparameters")
     print('='*80)
     print(f"\nPerformance Summary:")
-    print(f"  Coarse (32×32):  R² = {val_metrics_coarse['r2']:.6f}")
-    print(f"  Fine (320×320):  R² = {val_metrics_fine['r2']:.6f}, RMSE = {rmse_fine:.4f} mm/day")
+    print(f"  Coarse (32×32):                    R² = {val_metrics_coarse['r2']:.6f}")
+    print(f"  Fine (320×320, geometric):         R² = {val_metrics_fine['r2']:.6f}, RMSE = {rmse_fine:.4f} mm/day")
+    print(f"  Fine (320×320, DEM-aware):         R² = {val_metrics_fine_dem['r2']:.6f}, RMSE = {rmse_fine_dem:.4f} mm/day")
     print('='*80)
-    
+
     return rf, y_val_pred_fine, val_metrics_fine
 
 
 if __name__ == "__main__":
     import sys
-    
+
     if len(sys.argv) >= 3:
         train_size = int(sys.argv[3]) if len(sys.argv) >= 4 else 11323
         tune = sys.argv[4].lower() == 'true' if len(sys.argv) >= 5 else True
         n_iter = int(sys.argv[5]) if len(sys.argv) >= 6 else 50
-        
+
         try:
             rf, predictions, metrics = main_pipeline(
                 data_path=sys.argv[1],
